@@ -2,5 +2,5 @@
 name = "arbit-cli"
 version = "0.1.0"
 edition = "2024"
-
 [dependencies]
+arbit-providers = { path = '../arbit-providers' }
