@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+arbit-core = { path = "../arbit-core" }
+
+[lib]
+name = "arbit_ffi"
+crate-type = ["rlib", "staticlib"]
