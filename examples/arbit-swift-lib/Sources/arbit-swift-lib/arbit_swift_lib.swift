@@ -16,11 +16,53 @@ private func ffi_capture_context_new() -> OpaquePointer?
 @_silgen_name("arbit_capture_context_free")
 private func ffi_capture_context_free(_ handle: OpaquePointer?)
 
+@_silgen_name("arbit_init_logging")
+private func ffi_init_logging()
+
 @_silgen_name("arbit_ingest_camera_frame")
 private func ffi_ingest_camera_frame(
     _ handle: OpaquePointer?,
     _ frame: UnsafePointer<ArbitCameraFrame>?,
     _ sample: UnsafeMutablePointer<ArbitCameraSample>?
+) -> Bool
+
+@_silgen_name("arbit_capture_context_pyramid_levels")
+private func ffi_capture_context_pyramid_levels(
+    _ handle: OpaquePointer?,
+    _ levels: UnsafeMutablePointer<ArbitPyramidLevelView>?,
+    _ maxLevels: Int
+) -> Int
+
+@_silgen_name("arbit_capture_context_tracked_points")
+private func ffi_capture_context_tracked_points(
+    _ handle: OpaquePointer?,
+    _ points: UnsafeMutablePointer<ArbitTrackedPoint>?,
+    _ maxPoints: Int
+) -> Int
+
+@_silgen_name("arbit_capture_context_two_view")
+private func ffi_capture_context_two_view(
+    _ handle: OpaquePointer?,
+    _ summary: UnsafeMutablePointer<ArbitTwoViewSummary>?
+) -> Bool
+
+@_silgen_name("arbit_capture_context_trajectory")
+private func ffi_capture_context_trajectory(
+    _ handle: OpaquePointer?,
+    _ samples: UnsafeMutablePointer<ArbitPoseSample>?,
+    _ maxPoints: Int
+) -> Int
+
+@_silgen_name("arbit_ingest_accelerometer_sample")
+private func ffi_ingest_accelerometer_sample(
+    _ handle: OpaquePointer?,
+    _ sample: ArbitAccelerometerSample
+) -> Bool
+
+@_silgen_name("arbit_capture_context_gravity")
+private func ffi_capture_context_gravity(
+    _ handle: OpaquePointer?,
+    _ estimate: UnsafeMutablePointer<ArbitGravityEstimate>?
 ) -> Bool
 
 public enum CameraPixelFormat: UInt32, CaseIterable, Sendable {
@@ -213,6 +255,114 @@ public struct CameraSample: Sendable {
     }
 }
 
+public enum TrackStatus: UInt32, Sendable {
+    case converged = 0
+    case diverged = 1
+    case outOfBounds = 2
+
+    init(ffiValue: ArbitTrackStatus) {
+        switch UInt32(ffiValue.rawValue) {
+        case 0:
+            self = .converged
+        case 1:
+            self = .diverged
+        case 2:
+            self = .outOfBounds
+        default:
+            self = .diverged
+        }
+    }
+}
+
+public struct TrackedPoint: Sendable {
+    public var initial: SIMD2<Float>
+    public var refined: SIMD2<Float>
+    public var residual: Float
+    public var iterations: UInt32
+    public var status: TrackStatus
+
+    init(ffiValue: ArbitTrackedPoint) {
+        initial = SIMD2(x: ffiValue.initial_x, y: ffiValue.initial_y)
+        refined = SIMD2(x: ffiValue.refined_x, y: ffiValue.refined_y)
+        residual = ffiValue.residual
+        iterations = ffiValue.iterations
+        status = TrackStatus(ffiValue: ffiValue.status)
+    }
+}
+
+public struct PyramidLevelView: Sendable {
+    public var octave: Int
+    public var scale: Float
+    public var width: Int
+    public var height: Int
+    public var bytesPerRow: Int
+    public var data: Data
+
+    init?(ffiValue: ArbitPyramidLevelView) {
+        guard let pixels = ffiValue.pixels, ffiValue.pixels_len > 0 else {
+            return nil
+        }
+        octave = Int(ffiValue.octave)
+        scale = ffiValue.scale
+        width = Int(ffiValue.width)
+        height = Int(ffiValue.height)
+        bytesPerRow = Int(ffiValue.bytes_per_row)
+        data = Data(bytes: pixels, count: Int(ffiValue.pixels_len))
+    }
+}
+
+public struct TwoViewSummary: Sendable {
+    public var inliers: Int
+    public var averageError: Double
+    public var rotation: [Double]
+    public var translation: SIMD3<Double>
+
+    init(ffiValue: ArbitTwoViewSummary) {
+        inliers = Int(ffiValue.inliers)
+        averageError = ffiValue.average_error
+        var rotationElements = withUnsafeBytes(of: ffiValue.rotation) { buffer -> [Double] in
+            Array(buffer.bindMemory(to: Double.self).prefix(9))
+        }
+        if rotationElements.count < 9 {
+            rotationElements.append(contentsOf: Array(repeating: 0.0, count: 9 - rotationElements.count))
+        }
+        rotation = rotationElements
+        let translationElements = withUnsafeBytes(of: ffiValue.translation) { buffer -> [Double] in
+            Array(buffer.bindMemory(to: Double.self).prefix(3))
+        }
+        if translationElements.count >= 3 {
+            translation = SIMD3(translationElements[0], translationElements[1], translationElements[2])
+        } else {
+            translation = SIMD3.zero
+        }
+    }
+}
+
+public struct PoseSample: Sendable {
+    public var position: SIMD3<Double>
+
+    init(ffiValue: ArbitPoseSample) {
+        position = SIMD3(ffiValue.x, ffiValue.y, ffiValue.z)
+    }
+}
+
+public struct GravityVector: Sendable {
+    public var down: SIMD3<Double>
+    public var samples: UInt32
+
+    init(ffiValue: ArbitGravityEstimate) {
+        let components = withUnsafeBytes(of: ffiValue.down) { buffer -> [Double] in
+            Array(buffer.bindMemory(to: Double.self).prefix(3))
+        }
+        if components.count >= 3 {
+            down = SIMD3(components[0], components[1], components[2])
+        } else {
+            down = SIMD3.zero
+        }
+        samples = ffiValue.samples
+    }
+}
+
 public enum ArbitCaptureError: Error {
     case allocationFailed
     case ingestionFailed
@@ -230,6 +380,11 @@ public final class ArbitCaptureContext: @unchecked Sendable {
 
     deinit {
         ffi_capture_context_free(handle)
+    }
+
+    /// Initialize logging for the Rust library
+    public static func initLogging() {
+        ffi_init_logging()
     }
 
     public func ingest(_ frame: CameraFrame) throws -> CameraSample {
@@ -272,6 +427,104 @@ public final class ArbitCaptureContext: @unchecked Sendable {
         }
 
         return sample
+    }
+
+    /// Validates that a frame can be processed before ingestion
+    public func validateFrame(_ frame: CameraFrame) -> Bool {
+        return frame.withFFI { ffiFrame -> Bool in
+            var frameCopy = ffiFrame
+            var rawSample = ArbitCameraSample(
+                timestamps: ArbitFrameTimestamps(
+                    capture_seconds: 0,
+                    pipeline_seconds: 0,
+                    latency_seconds: 0
+                ),
+                intrinsics: ArbitCameraIntrinsics(
+                    fx: 0,
+                    fy: 0,
+                    cx: 0,
+                    cy: 0,
+                    skew: 0,
+                    width: 0,
+                    height: 0,
+                    distortion_len: 0,
+                    distortion: nil
+                ),
+                pixel_format: frame.pixelFormat.ffiValue,
+                bytes_per_row: 0
+            )
+
+            return withUnsafePointer(to: &frameCopy) { framePtr in
+                ffi_ingest_camera_frame(handle, framePtr, &rawSample)
+            }
+        }
+    }
+
+    public func pyramidLevels(maxLevels: Int = 3) -> [PyramidLevelView] {
+        guard maxLevels > 0 else { return [] }
+        let buffer = UnsafeMutablePointer<ArbitPyramidLevelView>.allocate(capacity: maxLevels)
+        defer { buffer.deallocate() }
+        let written = ffi_capture_context_pyramid_levels(handle, buffer, maxLevels)
+        guard written > 0 else { return [] }
+        var result: [PyramidLevelView] = []
+        result.reserveCapacity(written)
+        for index in 0..<written {
+            if let view = PyramidLevelView(ffiValue: buffer[index]) {
+                result.append(view)
+            }
+        }
+        return result
+    }
+
+    public func trackedPoints(maxPoints: Int = 256) -> [TrackedPoint] {
+        guard maxPoints > 0 else { return [] }
+        let buffer = UnsafeMutablePointer<ArbitTrackedPoint>.allocate(capacity: maxPoints)
+        defer { buffer.deallocate() }
+        let written = ffi_capture_context_tracked_points(handle, buffer, maxPoints)
+        guard written > 0 else { return [] }
+        var points: [TrackedPoint] = []
+        points.reserveCapacity(written)
+        for index in 0..<written {
+            points.append(TrackedPoint(ffiValue: buffer[index]))
+        }
+        return points
+    }
+
+    public func latestTwoViewSummary() -> TwoViewSummary? {
+        let summaryPtr = UnsafeMutablePointer<ArbitTwoViewSummary>.allocate(capacity: 1)
+        defer { summaryPtr.deallocate() }
+        let hasResult = ffi_capture_context_two_view(handle, summaryPtr)
+        guard hasResult else {
+            return nil
+        }
+        return TwoViewSummary(ffiValue: summaryPtr.pointee)
+    }
+
+    public func trajectory(maxPoints: Int = 512) -> [PoseSample] {
+        guard maxPoints > 0 else { return [] }
+        let buffer = UnsafeMutablePointer<ArbitPoseSample>.allocate(capacity: maxPoints)
+        defer { buffer.deallocate() }
+        let written = ffi_capture_context_trajectory(handle, buffer, maxPoints)
+        guard written > 0 else { return [] }
+        var samples: [PoseSample] = []
+        samples.reserveCapacity(written)
+        for index in 0..<written {
+            samples.append(PoseSample(ffiValue: buffer[index]))
+        }
+        return samples
+    }
+
+    public func ingestAccelerometer(ax: Double, ay: Double, az: Double, dt: Double) {
+        let sample = ArbitAccelerometerSample(ax: ax, ay: ay, az: az, dt_seconds: dt)
+        _ = ffi_ingest_accelerometer_sample(handle, sample)
+    }
+
+    public func gravityEstimate() -> GravityVector? {
+        let estimatePtr = UnsafeMutablePointer<ArbitGravityEstimate>.allocate(capacity: 1)
+        defer { estimatePtr.deallocate() }
+        let hasEstimate = ffi_capture_context_gravity(handle, estimatePtr)
+        guard hasEstimate else { return nil }
+        return GravityVector(ffiValue: estimatePtr.pointee)
     }
 }
 

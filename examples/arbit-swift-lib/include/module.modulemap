@@ -1,0 +1,4 @@
+module ArbitFFI {
+  header "arbit_swift.h"
+  export *
+}
