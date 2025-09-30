@@ -1,4 +1,5 @@
 use crate::math::se3::TransformSE3;
+use log::{debug, warn};
 use nalgebra::DVector;
 
 #[derive(Debug, Clone)]
@@ -42,6 +43,7 @@ impl KeyframeIndex {
     }
 
     pub fn insert(&mut self, entry: KeyframeEntry) {
+        debug!(target: "arbit_core::db", "Inserting keyframe {} with descriptor length {}", entry.id, entry.descriptor.len());
         self.keyframes.push(entry);
     }
 
@@ -54,18 +56,35 @@ impl KeyframeIndex {
     }
 
     pub fn query(&self, descriptor: &KeyframeDescriptor, k: usize) -> Vec<&KeyframeEntry> {
-        assert!(descriptor.len() > 0);
+        assert!(descriptor.len() > 0, "Query descriptor must not be empty");
+        debug!(target: "arbit_core::db", "Querying keyframe database: {} keyframes, descriptor length {}, requesting {} results",
+               self.keyframes.len(), descriptor.len(), k);
+
         let mut scored: Vec<_> = self
             .keyframes
             .iter()
-            .filter(|kf| kf.descriptor.len() == descriptor.len())
+            .filter(|kf| {
+                if kf.descriptor.len() != descriptor.len() {
+                    warn!(target: "arbit_core::db", "Keyframe {} has descriptor length {} but query has {}",
+                          kf.id, kf.descriptor.len(), descriptor.len());
+                    false
+                } else {
+                    true
+                }
+            })
             .map(|kf| {
                 let score = cosine_similarity(kf.descriptor.as_slice(), descriptor.as_slice());
                 (score, kf)
             })
             .collect();
+
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        scored.into_iter().take(k).map(|(_, kf)| kf).collect()
+        let results: Vec<&KeyframeEntry> = scored.into_iter().take(k).map(|(_, kf)| kf).collect();
+
+        debug!(target: "arbit_core::db", "Query returned {} results (best score: {:.4})",
+               results.len(), results.first().map(|kf| cosine_similarity(kf.descriptor.as_slice(), descriptor.as_slice())).unwrap_or(0.0));
+
+        results
     }
 }
 

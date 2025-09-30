@@ -1,3 +1,4 @@
+use log::{debug, trace};
 use nalgebra::{Matrix3, Matrix3x4, Point3, Rotation3, SVector, Vector2, Vector3};
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
@@ -49,12 +50,23 @@ impl TwoViewInitializer {
     }
 
     pub fn estimate(&self, matches: &[FeatureMatch]) -> Option<TwoViewInitialization> {
+        debug!(
+            "Starting two-view initialization with {} feature matches",
+            matches.len()
+        );
+
         if matches.len() < 8 {
+            debug!(
+                "Insufficient matches for two-view initialization: {} < 8",
+                matches.len()
+            );
             return None;
         }
 
         let mut rng = SmallRng::from_entropy();
         let mut best_inliers = Vec::new();
+        trace!("Running {} RANSAC iterations", self.params.iterations);
+
         for _ in 0..self.params.iterations {
             let sample_indices = sample(&mut rng, matches.len(), 8);
             let mut subset = [FeatureMatch {
@@ -77,14 +89,28 @@ impl TwoViewInitializer {
         }
 
         if best_inliers.len() < 8 {
+            debug!(
+                "No sufficient inliers found after RANSAC (best: {})",
+                best_inliers.len()
+            );
             return None;
         }
 
         let inlier_matches: Vec<_> = best_inliers.iter().map(|&i| matches[i]).collect();
+        debug!(
+            "Refining essential matrix with {} inliers",
+            inlier_matches.len()
+        );
         let refined_e = estimate_essential(&inlier_matches);
 
         let decomposition = choose_pose(&refined_e, &inlier_matches)?;
         let (avg_error, final_inliers) = evaluate_model(matches, &refined_e, self.params.threshold);
+
+        debug!(
+            "Two-view initialization successful: {} final inliers, avg error: {:.6}",
+            final_inliers.len(),
+            avg_error
+        );
 
         Some(TwoViewInitialization {
             essential: refined_e,

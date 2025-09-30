@@ -1,3 +1,4 @@
+use log::{debug, warn};
 use nalgebra::Vector3;
 use std::collections::VecDeque;
 
@@ -36,9 +37,12 @@ impl ScaleDriftMonitor {
 
     pub fn update(&mut self, accel: Vector3<f64>) -> ScaleEstimate {
         let norm = accel.norm();
+        debug!(target: "arbit_core::imu", "Scale monitor update: accel norm={:.4}, window size={}", norm, self.window.len());
+
         if self.window.len() == self.capacity {
             if let Some(oldest) = self.window.pop_front() {
                 self.sum -= oldest;
+                debug!(target: "arbit_core::imu", "Scale monitor: removed oldest value {:.4}, new sum: {:.4}", oldest, self.sum);
             }
         }
         self.window.push_back(norm);
@@ -51,9 +55,18 @@ impl ScaleDriftMonitor {
         };
 
         let ratio = avg / GRAVITY_MS2;
+        let drift_percent = (ratio - 1.0).abs() * 100.0;
+
+        debug!(target: "arbit_core::imu", "Scale estimate: avg={:.4}, ratio={:.4}, drift={:.2}%",
+               avg, ratio, drift_percent);
+
+        if drift_percent > 5.0 {
+            warn!(target: "arbit_core::imu", "Large scale drift detected: {:.2}% (ratio: {:.4})", drift_percent, ratio);
+        }
+
         ScaleEstimate {
             norm_ratio: ratio,
-            drift_percent: (ratio - 1.0).abs() * 100.0,
+            drift_percent,
         }
     }
 }

@@ -61,6 +61,9 @@ impl SE3 {
         let omega = twist.omega;
         let v = twist.v;
         let theta = omega.norm();
+
+        log::trace!(target: "arbit_core::math", "SE3 exp: theta={:.6}, omega={:.4?}, v={:.4?}", theta, omega, v);
+
         let rotation = SO3::exp(&omega);
         let omega_hat = skew_symmetric(&omega);
         let identity = Matrix3::identity();
@@ -88,6 +91,8 @@ impl SE3 {
         let omega_hat = skew_symmetric(&omega);
         let identity = Matrix3::identity();
         let translation = self.translation;
+
+        log::trace!(target: "arbit_core::math", "SE3 log: theta={:.6}, translation={:.4?}", theta, translation);
 
         let v = if theta < 1e-9 {
             let omega_hat_sq = omega_hat * omega_hat;

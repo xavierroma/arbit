@@ -1,5 +1,6 @@
 use crate::logs::{FrameLogEntry, ReplayLog};
 use crate::math::se3::TransformSE3;
+use log::{debug, info, warn};
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone, Copy)]
@@ -86,14 +87,27 @@ impl VoLoop {
     }
 
     pub fn process(&mut self, observation: FrameObservation) -> VoStatus {
+        debug!(target: "arbit_core::vo", "Processing frame {}: tracks={}, inliers={:.2}%, fb_error={:.2}",
+               observation.frame_index, observation.track_count, observation.inlier_ratio * 100.0, observation.forward_backward_error);
+
         self.metrics
             .update(observation, self.config.metrics_window.max(1));
 
         let status = self.evaluate(observation);
-        if matches!(status, VoStatus::Lost) {
-            self.consecutive_losses += 1;
-        } else {
-            self.consecutive_losses = 0;
+        match status {
+            VoStatus::Lost => {
+                self.consecutive_losses += 1;
+                warn!(target: "arbit_core::vo", "VO tracking lost (consecutive: {})", self.consecutive_losses);
+            }
+            VoStatus::Degrading => {
+                warn!(target: "arbit_core::vo", "VO tracking degrading");
+            }
+            VoStatus::Healthy => {
+                if self.consecutive_losses > 0 {
+                    info!(target: "arbit_core::vo", "VO tracking recovered after {} lost frames", self.consecutive_losses);
+                    self.consecutive_losses = 0;
+                }
+            }
         }
 
         self.log.push(FrameLogEntry {

@@ -1,3 +1,4 @@
+use log::{debug, warn};
 use nalgebra::{UnitVector3, Vector3};
 
 /// Holds the running gravity estimate along with helper accessors to derive
@@ -46,8 +47,9 @@ impl GravityEstimator {
     /// * `dt` — time delta since the previous sample in seconds.
     pub fn update(&mut self, accel: Vector3<f64>, dt: f64) -> Option<GravityEstimate> {
         if !dt.is_finite() || dt <= 0.0 {
-            return self.estimate.map(|vec| GravityEstimate {
-                gravity_dir: UnitVector3::new_normalize(vec),
+            warn!(target: "arbit_core::imu", "Invalid time delta: {:.6}s (must be finite and positive)", dt);
+            return self.estimate.as_ref().map(|vec| GravityEstimate {
+                gravity_dir: UnitVector3::new_normalize(*vec),
             });
         }
 
@@ -60,14 +62,21 @@ impl GravityEstimator {
         };
 
         if current.magnitude() < f64::EPSILON {
-            return self.estimate.map(|vec| GravityEstimate {
-                gravity_dir: UnitVector3::new_normalize(vec),
+            warn!(target: "arbit_core::imu", "Accelerometer reading magnitude too small: {:.6}", current.magnitude());
+            return self.estimate.as_ref().map(|vec| GravityEstimate {
+                gravity_dir: UnitVector3::new_normalize(*vec),
             });
         }
 
         self.estimate = Some(current);
-        self.estimate.map(|vec| GravityEstimate {
-            gravity_dir: UnitVector3::new_normalize(vec),
+
+        if let Some(ref estimate) = self.estimate {
+            debug!(target: "arbit_core::imu", "Gravity estimate updated (sample {}): magnitude={:.4}, alpha={:.4}",
+                   self.samples, estimate.magnitude(), alpha);
+        }
+
+        self.estimate.as_ref().map(|vec| GravityEstimate {
+            gravity_dir: UnitVector3::new_normalize(*vec),
         })
     }
 

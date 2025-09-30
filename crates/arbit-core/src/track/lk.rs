@@ -1,4 +1,5 @@
 use crate::img::pyramid::{Pyramid, PyramidLevel};
+use log::{debug, trace};
 use nalgebra::Vector2;
 
 #[derive(Debug, Clone, Copy)]
@@ -49,12 +50,19 @@ impl Tracker {
         curr: &Pyramid,
         initial_position: Vector2<f32>,
     ) -> TrackObservation {
+        trace!(
+            "Tracking feature from {:?} across {} pyramid levels",
+            initial_position,
+            prev.levels().len()
+        );
+
         let mut current_base = initial_position;
         let mut total_iterations = 0u32;
         let mut residual = 0.0f32;
 
         let levels = prev.levels();
         if levels.is_empty() {
+            debug!("No pyramid levels available for tracking");
             return TrackObservation {
                 initial: initial_position,
                 refined: initial_position,
@@ -88,13 +96,20 @@ impl Tracker {
             }
         }
 
-        TrackObservation {
+        let result = TrackObservation {
             initial: initial_position,
             refined: current_base,
             iterations: total_iterations,
             residual,
             outcome: TrackOutcome::Converged,
-        }
+        };
+
+        debug!(
+            "Tracking completed: {:?} -> {:?} ({} iterations, residual: {:.4})",
+            initial_position, result.refined, total_iterations, residual
+        );
+
+        result
     }
 
     fn track_level(

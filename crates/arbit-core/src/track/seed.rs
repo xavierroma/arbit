@@ -1,4 +1,5 @@
 use crate::img::pyramid::PyramidLevel;
+use log::{debug, trace};
 use nalgebra::Vector2;
 
 #[derive(Debug, Clone, Copy)]
@@ -40,8 +41,14 @@ impl FeatureSeeder {
         let width = level.image.width();
         let height = level.image.height();
 
+        debug!(
+            "Seeding features in {}x{} image (octave {}, cell size {})",
+            width, height, level.octave, cell
+        );
+
         let cells_x = (width + cell - 1) / cell;
         let cells_y = (height + cell - 1) / cell;
+        trace!("Processing {}x{} cells", cells_x, cells_y);
 
         for cy in 0..cells_y {
             let y_min = cy * cell;
@@ -83,6 +90,12 @@ impl FeatureSeeder {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         seeds.truncate(self.config.max_features);
+
+        debug!(
+            "Found {} feature seeds (max: {})",
+            seeds.len(),
+            self.config.max_features
+        );
         seeds
     }
 }

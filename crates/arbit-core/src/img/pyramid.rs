@@ -1,3 +1,4 @@
+use log::{debug, trace};
 use std::ops::{Index, IndexMut};
 
 const GAUSS_KERNEL: [f32; 5] = [1.0, 4.0, 6.0, 4.0, 1.0];
@@ -84,6 +85,14 @@ impl ImageBuffer {
     }
 
     pub fn from_bgra8(bytes: &[u8], width: usize, height: usize, bytes_per_row: usize) -> Self {
+        debug!(
+            "Converting BGRA8 buffer to grayscale: {}x{}, {} bytes per row, {} total bytes",
+            width,
+            height,
+            bytes_per_row,
+            bytes.len()
+        );
+
         assert!(
             bytes.len() >= bytes_per_row * height,
             "Byte buffer shorter than expected rows."
@@ -101,6 +110,7 @@ impl ImageBuffer {
                 data.push(gray);
             }
         }
+        debug!("Converted BGRA8 to grayscale image: {}x{}", width, height);
         Self {
             width,
             height,
@@ -154,10 +164,18 @@ impl Pyramid {
 pub fn build_pyramid(base: &ImageBuffer, octaves: usize) -> Pyramid {
     assert!(octaves >= 1, "Pyramid must contain at least one octave.");
 
+    debug!(
+        "Building pyramid with {} octaves from {}x{} image",
+        octaves,
+        base.width(),
+        base.height()
+    );
+
     let mut levels = Vec::with_capacity(octaves);
     let mut current = base.clone();
 
     for octave in 0..octaves {
+        trace!("Processing octave {}", octave);
         let blurred = gaussian_blur(&current);
         let (grad_x, grad_y) = sobel_gradients(&blurred);
         levels.push(PyramidLevel {

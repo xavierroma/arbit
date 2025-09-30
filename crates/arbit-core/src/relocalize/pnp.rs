@@ -1,4 +1,5 @@
 use crate::math::se3::{SE3, TransformSE3, Twist};
+use log::{debug, warn};
 use nalgebra::{
     Matrix2x3, Matrix2x6, Matrix3, Matrix3x4, Point3, Rotation3, SMatrix, SVector, Translation3,
     Vector2, Vector3,
@@ -47,7 +48,10 @@ impl PnPRansac {
     }
 
     pub fn estimate(&self, observations: &[PnPObservation]) -> Option<PnPResult> {
+        debug!(target: "arbit_core::pnp", "Starting PnP estimation with {} observations", observations.len());
+
         if observations.len() < 6 {
+            warn!(target: "arbit_core::pnp", "Insufficient observations for PnP: {} < 6", observations.len());
             return None;
         }
 
@@ -56,6 +60,7 @@ impl PnPRansac {
         let mut best_pose = None;
 
         let sample_size = observations.len().min(12).max(6);
+        debug!(target: "arbit_core::pnp", "Using sample size {} for RANSAC", sample_size);
 
         for _ in 0..self.params.iterations {
             let sample_indices = sample(&mut rng, observations.len(), sample_size);
@@ -114,6 +119,16 @@ impl PnPRansac {
             self.params.threshold,
             self.params.min_inliers,
         );
+
+        let inlier_count = inliers.len();
+        let inlier_ratio = inlier_count as f64 / observations.len() as f64;
+
+        debug!(target: "arbit_core::pnp", "PnP estimation completed: {} inliers ({:.1}%), avg error: {:.4}",
+               inlier_count, inlier_ratio * 100.0, avg_error);
+
+        if inlier_ratio < 0.5 {
+            warn!(target: "arbit_core::pnp", "Low inlier ratio: {:.1}% may indicate poor pose estimate", inlier_ratio * 100.0);
+        }
 
         Some(PnPResult {
             pose,

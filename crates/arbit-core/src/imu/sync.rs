@@ -1,3 +1,4 @@
+use log::{debug, warn};
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -25,12 +26,23 @@ impl TimeOffsetEstimator {
         let diff_nanos = (imu_time.as_nanos() as i128) - (reference_time.as_nanos() as i128);
         let diff_seconds = diff_nanos as f64 / 1e9;
 
+        debug!(target: "arbit_core::imu", "Time offset sample: IMU={:.6}s, REF={:.6}s, diff={:+.6}s",
+               imu_time.as_secs_f64(), reference_time.as_secs_f64(), diff_seconds);
+
         if self.window.len() == self.capacity {
-            self.window.pop_front();
+            if let Some(oldest) = self.window.pop_front() {
+                debug!(target: "arbit_core::imu", "Time offset window full, removing oldest value: {:.6}s", oldest);
+            }
         }
         self.window.push_back(diff_seconds);
 
-        self.window.iter().sum::<f64>() / (self.window.len() as f64)
+        let estimate = self.window.iter().sum::<f64>() / (self.window.len() as f64);
+
+        if self.window.len() >= 10 {
+            debug!(target: "arbit_core::imu", "Time offset estimate: {:.6}s ({} samples)", estimate, self.window.len());
+        }
+
+        estimate
     }
 
     pub fn len(&self) -> usize {
@@ -60,7 +72,11 @@ impl ImuTimestampTracker {
 
     pub fn ingest(&mut self, raw: Duration) -> Duration {
         let next = match self.last {
-            Some(prev) if raw <= prev => prev + EPSILON,
+            Some(prev) if raw <= prev => {
+                warn!(target: "arbit_core::imu", "Non-monotonic IMU timestamp detected: {} <= {}, correcting to {}",
+                      raw.as_secs_f64(), prev.as_secs_f64(), (prev + EPSILON).as_secs_f64());
+                prev + EPSILON
+            }
             _ => raw,
         };
         self.last = Some(next);

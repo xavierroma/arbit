@@ -1,3 +1,4 @@
+use log::{debug, warn};
 use std::time::{Duration, Instant};
 
 const EPSILON: Duration = Duration::from_nanos(1);
@@ -65,6 +66,12 @@ impl<C: Clock> TimestampPolicy<C> {
         let pipeline_now = self.clock.now();
         let latency = pipeline_now.checked_sub(capture).unwrap_or_default();
         let pipeline_ts = self.enforce_pipeline_monotonic(pipeline_now);
+
+        debug!(target: "arbit_core::time", "Frame timestamps: capture={:.6}s, pipeline={:.6}s, latency={:.6}s",
+               capture_ts.as_duration().as_secs_f64(),
+               pipeline_ts.as_duration().as_secs_f64(),
+               latency.as_secs_f64());
+
         FrameTimestamps::new(capture_ts, pipeline_ts, latency)
     }
 
@@ -87,7 +94,9 @@ impl<C: Clock> TimestampPolicy<C> {
     ) -> MonotonicTimestamp {
         match last {
             Some(prev) if candidate <= prev.0 => {
-                MonotonicTimestamp::from_duration(prev.0.checked_add(EPSILON).unwrap_or(prev.0))
+                let corrected = prev.0.checked_add(EPSILON).unwrap_or(prev.0);
+                warn!(target: "arbit_core::time", "Non-monotonic timestamp corrected: {} -> {}", candidate.as_secs_f64(), corrected.as_secs_f64());
+                MonotonicTimestamp::from_duration(corrected)
             }
             _ => MonotonicTimestamp::from_duration(candidate),
         }
