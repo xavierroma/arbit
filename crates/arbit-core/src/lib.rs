@@ -2,9 +2,11 @@ pub mod adapters;
 pub mod img;
 pub mod imu;
 pub mod init;
+pub mod logs;
 pub mod math;
 pub mod time;
 pub mod track;
+pub mod vo;
 
 #[cfg(test)]
 mod tests {
