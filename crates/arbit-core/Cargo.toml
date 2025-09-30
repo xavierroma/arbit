@@ -7,6 +7,7 @@ edition = "2024"
 nalgebra = "0.34.1"
 nalgebra-glm = "0.20.0"
 rand = { version = "0.8", features = ["small_rng"] }
+log = "0.4"
 
 [dev-dependencies]
 approx = "0.5"

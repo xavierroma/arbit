@@ -10,9 +10,13 @@
 #![deny(unused_must_use)]
 
 pub use arbit_ffi::{
-    ArbitCameraFrame, ArbitCameraIntrinsics, ArbitCameraSample, ArbitCaptureContextHandle,
-    ArbitFrameTimestamps, ArbitPixelFormat, ArbitTransform, arbit_capture_context_free,
-    arbit_capture_context_new, arbit_ingest_camera_frame,
+    ArbitAccelerometerSample, ArbitCameraFrame, ArbitCameraIntrinsics, ArbitCameraSample,
+    ArbitCaptureContextHandle, ArbitFrameTimestamps, ArbitGravityEstimate, ArbitPixelFormat,
+    ArbitPoseSample, ArbitPyramidLevelView, ArbitTrackStatus, ArbitTrackedPoint, ArbitTransform,
+    ArbitTwoViewSummary, arbit_capture_context_free, arbit_capture_context_gravity,
+    arbit_capture_context_new, arbit_capture_context_pyramid_levels,
+    arbit_capture_context_tracked_points, arbit_capture_context_trajectory,
+    arbit_capture_context_two_view, arbit_ingest_accelerometer_sample, arbit_ingest_camera_frame,
 };
 
 use arbit_core::adapters::world_from_scenekit;

@@ -19,6 +19,16 @@ if [[ ! -d "${headers_dir}" ]]; then
   exit 1
 fi
 
+# if ! command -v cbindgen >/dev/null 2>&1; then
+#   echo "error: cbindgen must be installed (cargo install cbindgen)." >&2
+#   exit 1
+# fi
+
+# cbindgen "${crate_root}" \
+#   --config "${crate_root}/cbindgen.toml" \
+#   --crate "${crate_package}" \
+#   --output "${headers_dir}/arbit_swift.h"
+
 ensure_target() {
   local target="$1"
   if ! rustup target list --installed | grep -q "^${target}$"; then

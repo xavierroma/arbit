@@ -1,0 +1,36 @@
+language = "C"
+include_guard = "ARBIT_SWIFT_H"
+pragma_once = false
+sys_includes = []
+no_includes = true
+
+header = """
+#ifndef ARBIT_SWIFT_H
+#define ARBIT_SWIFT_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+"""
+
+trailer = """
+#ifdef __cplusplus
+}
+#endif
+
+#endif // ARBIT_SWIFT_H
+"""
+
+[parse]
+parse_deps = true
+extra_bindings = []
+
+[export]
+include = ["arbit_swift"]
+
+[style]
+fn_args = "Linear"
