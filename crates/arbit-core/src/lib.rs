@@ -3,6 +3,7 @@ pub mod img;
 pub mod imu;
 pub mod math;
 pub mod time;
+pub mod track;
 
 #[cfg(test)]
 mod tests {

@@ -58,6 +58,31 @@ impl ImageBuffer {
         self.data[idx] = value;
     }
 
+    pub fn sample(&self, x: f32, y: f32) -> f32 {
+        if x < 0.0 || y < 0.0 {
+            return 0.0;
+        }
+        if x > (self.width - 1) as f32 || y > (self.height - 1) as f32 {
+            return 0.0;
+        }
+
+        let x0 = x.floor() as usize;
+        let y0 = y.floor() as usize;
+        let x1 = (x0 + 1).min(self.width - 1);
+        let y1 = (y0 + 1).min(self.height - 1);
+        let dx = x - x0 as f32;
+        let dy = y - y0 as f32;
+
+        let v00 = self.get(x0, y0);
+        let v10 = self.get(x1, y0);
+        let v01 = self.get(x0, y1);
+        let v11 = self.get(x1, y1);
+
+        let v0 = v00 + dx * (v10 - v00);
+        let v1 = v01 + dx * (v11 - v01);
+        v0 + dy * (v1 - v0)
+    }
+
     pub fn from_bgra8(bytes: &[u8], width: usize, height: usize, bytes_per_row: usize) -> Self {
         assert!(
             bytes.len() >= bytes_per_row * height,
