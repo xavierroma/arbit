@@ -1,0 +1,424 @@
+use nalgebra::{Matrix3, Matrix3x4, Point3, Rotation3, SVector, Vector2, Vector3};
+use rand::SeedableRng;
+use rand::rngs::SmallRng;
+use rand::seq::index::sample;
+
+#[derive(Debug, Clone, Copy)]
+pub struct FeatureMatch {
+    pub normalized_a: Vector2<f64>,
+    pub normalized_b: Vector2<f64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RansacParams {
+    pub iterations: usize,
+    pub threshold: f64,
+}
+
+impl Default for RansacParams {
+    fn default() -> Self {
+        Self {
+            iterations: 200,
+            threshold: 1e-3,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TwoViewInitialization {
+    pub essential: Matrix3<f64>,
+    pub rotation: Rotation3<f64>,
+    pub translation: Vector3<f64>,
+    pub inliers: Vec<usize>,
+    pub average_sampson_error: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DecomposedEssential {
+    pub rotation: Rotation3<f64>,
+    pub translation: Vector3<f64>,
+}
+
+pub struct TwoViewInitializer {
+    params: RansacParams,
+}
+
+impl TwoViewInitializer {
+    pub fn new(params: RansacParams) -> Self {
+        Self { params }
+    }
+
+    pub fn estimate(&self, matches: &[FeatureMatch]) -> Option<TwoViewInitialization> {
+        if matches.len() < 8 {
+            return None;
+        }
+
+        let mut rng = SmallRng::from_entropy();
+        let mut best_inliers = Vec::new();
+        for _ in 0..self.params.iterations {
+            let sample_indices = sample(&mut rng, matches.len(), 8);
+            let mut subset = [FeatureMatch {
+                normalized_a: Vector2::zeros(),
+                normalized_b: Vector2::zeros(),
+            }; 8];
+            for (dst, idx) in subset.iter_mut().zip(sample_indices.iter()) {
+                *dst = matches[idx];
+            }
+
+            let e_candidate = estimate_essential(&subset);
+            if !e_candidate.iter().all(|v| v.is_finite()) {
+                continue;
+            }
+
+            let inliers = score_inliers(matches, &e_candidate, self.params.threshold);
+            if inliers.len() > best_inliers.len() {
+                best_inliers = inliers;
+            }
+        }
+
+        if best_inliers.len() < 8 {
+            return None;
+        }
+
+        let inlier_matches: Vec<_> = best_inliers.iter().map(|&i| matches[i]).collect();
+        let refined_e = estimate_essential(&inlier_matches);
+
+        let decomposition = choose_pose(&refined_e, &inlier_matches)?;
+        let (avg_error, final_inliers) = evaluate_model(matches, &refined_e, self.params.threshold);
+
+        Some(TwoViewInitialization {
+            essential: refined_e,
+            rotation: decomposition.rotation,
+            translation: decomposition.translation,
+            inliers: final_inliers,
+            average_sampson_error: avg_error,
+        })
+    }
+}
+
+fn estimate_essential(matches: &[FeatureMatch]) -> Matrix3<f64> {
+    let (points_a, t_a) = normalize_points(matches.iter().map(|m| m.normalized_a).collect());
+    let (points_b, t_b) = normalize_points(matches.iter().map(|m| m.normalized_b).collect());
+
+    let mut a = nalgebra::DMatrix::<f64>::zeros(matches.len(), 9);
+    for (row, (pa, pb)) in points_a.iter().zip(points_b.iter()).enumerate() {
+        let x1 = pa.x;
+        let y1 = pa.y;
+        let x2 = pb.x;
+        let y2 = pb.y;
+        a[(row, 0)] = x2 * x1;
+        a[(row, 1)] = x2 * y1;
+        a[(row, 2)] = x2;
+        a[(row, 3)] = y2 * x1;
+        a[(row, 4)] = y2 * y1;
+        a[(row, 5)] = y2;
+        a[(row, 6)] = x1;
+        a[(row, 7)] = y1;
+        a[(row, 8)] = 1.0;
+    }
+
+    let svd = nalgebra::SVD::new(a, true, true);
+    let v_t = svd.v_t.expect("SVD should provide V^T");
+    let e_vec = v_t.row(v_t.nrows() - 1);
+    let mut e = Matrix3::zeros();
+    e[(0, 0)] = e_vec[0];
+    e[(0, 1)] = e_vec[1];
+    e[(0, 2)] = e_vec[2];
+    e[(1, 0)] = e_vec[3];
+    e[(1, 1)] = e_vec[4];
+    e[(1, 2)] = e_vec[5];
+    e[(2, 0)] = e_vec[6];
+    e[(2, 1)] = e_vec[7];
+    e[(2, 2)] = e_vec[8];
+
+    e = t_b.transpose() * e * t_a;
+    enforce_rank2(&mut e);
+    e
+}
+
+fn normalize_points(points: Vec<Vector2<f64>>) -> (Vec<Vector2<f64>>, Matrix3<f64>) {
+    let centroid = points.iter().fold(Vector2::zeros(), |acc, p| acc + p) / (points.len() as f64);
+
+    let mut mean_dist = 0.0;
+    for p in &points {
+        mean_dist += (p - centroid).norm();
+    }
+    mean_dist /= points.len() as f64;
+    let scale = if mean_dist.abs() < std::f64::EPSILON {
+        1.0
+    } else {
+        (2.0f64).sqrt() / mean_dist
+    };
+
+    let transform = Matrix3::new(
+        scale,
+        0.0,
+        -scale * centroid.x,
+        0.0,
+        scale,
+        -scale * centroid.y,
+        0.0,
+        0.0,
+        1.0,
+    );
+
+    let transformed: Vec<_> = points
+        .into_iter()
+        .map(|p| {
+            let v = Vector3::new(p.x, p.y, 1.0);
+            let norm = transform * v;
+            Vector2::new(norm.x / norm.z, norm.y / norm.z)
+        })
+        .collect();
+
+    (transformed, transform)
+}
+
+fn enforce_rank2(e: &mut Matrix3<f64>) {
+    let svd = nalgebra::SVD::new(*e, true, true);
+    let mut singular = svd.singular_values;
+    if singular.len() >= 3 {
+        let avg = 0.5 * (singular[0] + singular[1]);
+        singular[0] = avg;
+        singular[1] = avg;
+        singular[2] = 0.0;
+    }
+    let u = svd.u.unwrap();
+    let vt = svd.v_t.unwrap();
+    *e = u * nalgebra::Matrix3::from_diagonal(&singular) * vt;
+}
+
+fn score_inliers(matches: &[FeatureMatch], essential: &Matrix3<f64>, threshold: f64) -> Vec<usize> {
+    let mut inliers = Vec::new();
+    for (idx, m) in matches.iter().enumerate() {
+        let err = sampson_error(essential, m);
+        if err < threshold {
+            inliers.push(idx);
+        }
+    }
+    inliers
+}
+
+fn evaluate_model(
+    matches: &[FeatureMatch],
+    essential: &Matrix3<f64>,
+    threshold: f64,
+) -> (f64, Vec<usize>) {
+    let mut errors = Vec::new();
+    let mut inliers = Vec::new();
+    for (idx, m) in matches.iter().enumerate() {
+        let err = sampson_error(essential, m);
+        if err < threshold {
+            inliers.push(idx);
+            errors.push(err);
+        }
+    }
+
+    let average = if errors.is_empty() {
+        f64::MAX
+    } else {
+        errors.iter().sum::<f64>() / (errors.len() as f64)
+    };
+    (average, inliers)
+}
+
+fn sampson_error(e: &Matrix3<f64>, match_pair: &FeatureMatch) -> f64 {
+    let x1 = SVector::<f64, 3>::new(match_pair.normalized_a.x, match_pair.normalized_a.y, 1.0);
+    let x2 = SVector::<f64, 3>::new(match_pair.normalized_b.x, match_pair.normalized_b.y, 1.0);
+    let ex1 = e * x1;
+    let etx2 = e.transpose() * x2;
+    let denom = ex1.x.powi(2) + ex1.y.powi(2) + etx2.x.powi(2) + etx2.y.powi(2);
+    if denom.abs() < 1e-12 {
+        return f64::MAX;
+    }
+    let numerator = x2.transpose() * e * x1;
+    let num_scalar = numerator[(0, 0)];
+    (num_scalar * num_scalar / denom).abs()
+}
+
+fn choose_pose(essential: &Matrix3<f64>, matches: &[FeatureMatch]) -> Option<DecomposedEssential> {
+    let svd = nalgebra::SVD::new(*essential, true, true);
+    let mut u = svd.u?;
+    let mut vt = svd.v_t?;
+
+    if u.determinant() < 0.0 {
+        let mut col2 = u.column_mut(2);
+        col2 *= -1.0;
+    }
+    if vt.determinant() < 0.0 {
+        let mut row2 = vt.row_mut(2);
+        row2 *= -1.0;
+    }
+
+    let w = Matrix3::new(0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0);
+    let r1 = Rotation3::from_matrix_unchecked(u * w * vt);
+    let r2 = Rotation3::from_matrix_unchecked(u * w.transpose() * vt);
+    let t = u.column(2).into_owned();
+
+    let candidates = [(r1, t), (r1, -t), (r2, t), (r2, -t)];
+
+    let p1 = Matrix3x4::new(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+
+    let mut best = None;
+    let mut best_positive = 0usize;
+
+    for (rotation, t_vec) in candidates.iter() {
+        let p2 = compose_projection(rotation, t_vec);
+
+        let mut positive = 0usize;
+        for m in matches {
+            if let Some(point) = triangulate(&p1, &p2, m) {
+                let depth1 = point.z;
+                let cam2 = rotation * point.coords + t_vec;
+                if depth1 > 0.0 && cam2.z > 0.0 {
+                    positive += 1;
+                }
+            }
+        }
+
+        if positive > best_positive {
+            best_positive = positive;
+            best = Some(DecomposedEssential {
+                rotation: *rotation,
+                translation: t_vec.normalize(),
+            });
+        }
+    }
+
+    best
+}
+
+fn compose_projection(rotation: &Rotation3<f64>, translation: &Vector3<f64>) -> Matrix3x4<f64> {
+    let r = rotation.matrix();
+    Matrix3x4::new(
+        r[(0, 0)],
+        r[(0, 1)],
+        r[(0, 2)],
+        translation.x,
+        r[(1, 0)],
+        r[(1, 1)],
+        r[(1, 2)],
+        translation.y,
+        r[(2, 0)],
+        r[(2, 1)],
+        r[(2, 2)],
+        translation.z,
+    )
+}
+
+fn triangulate(p1: &Matrix3x4<f64>, p2: &Matrix3x4<f64>, m: &FeatureMatch) -> Option<Point3<f64>> {
+    let mut a = nalgebra::DMatrix::<f64>::zeros(4, 4);
+
+    fill_triangulation_row(&mut a, 0, p1, m.normalized_a.x, 0);
+    fill_triangulation_row(&mut a, 1, p1, m.normalized_a.y, 1);
+    fill_triangulation_row(&mut a, 2, p2, m.normalized_b.x, 0);
+    fill_triangulation_row(&mut a, 3, p2, m.normalized_b.y, 1);
+
+    let svd = nalgebra::SVD::new(a, true, true);
+    let v_t = svd.v_t?;
+    let homog = v_t.row(v_t.nrows() - 1);
+    if homog[3].abs() < 1e-12 {
+        return None;
+    }
+    let point = Point3::new(
+        homog[0] / homog[3],
+        homog[1] / homog[3],
+        homog[2] / homog[3],
+    );
+    Some(point)
+}
+
+fn fill_triangulation_row(
+    a: &mut nalgebra::DMatrix<f64>,
+    row: usize,
+    projection: &Matrix3x4<f64>,
+    value: f64,
+    axis: usize,
+) {
+    let row_data = projection.row(axis);
+    let third_row = projection.row(2);
+    for col in 0..4 {
+        a[(row, col)] = value * third_row[col] - row_data[col];
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+    use rand::{Rng, SeedableRng};
+
+    #[test]
+    fn initializer_recovers_pose() {
+        let rotation = Rotation3::from_axis_angle(&Vector3::z_axis(), 0.1);
+        let translation = Vector3::new(0.3, 0.0, 0.1);
+
+        let points = generate_scene(100, 1.5, 3.5);
+        let matches = project_scene(&points, rotation, translation);
+
+        let initializer = TwoViewInitializer::new(RansacParams {
+            iterations: 300,
+            threshold: 5e-4,
+        });
+
+        let result = initializer
+            .estimate(&matches)
+            .expect("two view initialization");
+        assert!(result.inliers.len() >= 80);
+        assert!(result.average_sampson_error < 1e-3);
+
+        assert_relative_eq!(result.rotation.matrix(), rotation.matrix(), epsilon = 1e-2);
+        assert_relative_eq!(
+            result.translation.normalize(),
+            translation.normalize(),
+            epsilon = 1e-2
+        );
+    }
+
+    #[test]
+    fn initializer_rejects_small_sets() {
+        let initializer = TwoViewInitializer::new(RansacParams::default());
+        let matches = vec![
+            FeatureMatch {
+                normalized_a: Vector2::new(0.0, 0.0),
+                normalized_b: Vector2::new(0.0, 0.0),
+            };
+            5
+        ];
+        assert!(initializer.estimate(&matches).is_none());
+    }
+
+    fn project_scene(
+        points: &[Point3<f64>],
+        rotation: Rotation3<f64>,
+        translation: Vector3<f64>,
+    ) -> Vec<FeatureMatch> {
+        let mut matches = Vec::with_capacity(points.len());
+        for p in points {
+            let pa = project_point(p);
+            let pb_cam = rotation * p.coords + translation;
+            let pb = project_point(&Point3::from(pb_cam));
+            matches.push(FeatureMatch {
+                normalized_a: pa,
+                normalized_b: pb,
+            });
+        }
+        matches
+    }
+
+    fn project_point(point: &Point3<f64>) -> Vector2<f64> {
+        Vector2::new(point.x / point.z, point.y / point.z)
+    }
+
+    fn generate_scene(count: usize, z_min: f64, z_max: f64) -> Vec<Point3<f64>> {
+        let mut rng = SmallRng::seed_from_u64(42);
+        let mut points = Vec::with_capacity(count);
+        for _ in 0..count {
+            let x = rng.gen_range(-0.6..0.6);
+            let y = rng.gen_range(-0.6..0.6);
+            let z = rng.gen_range(z_min..z_max);
+            points.push(Point3::new(x, y, z));
+        }
+        points
+    }
+}

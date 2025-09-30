@@ -1,6 +1,7 @@
 pub mod adapters;
 pub mod img;
 pub mod imu;
+pub mod init;
 pub mod math;
 pub mod time;
 pub mod track;
