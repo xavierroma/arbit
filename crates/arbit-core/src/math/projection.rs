@@ -1,4 +1,4 @@
-use nalgebra::{Matrix2x3, Point3};
+use nalgebra::{Matrix2x3, Matrix3, Point3};
 
 /// Basic radial/tangential distortion container.
 #[derive(Debug, Clone, PartialEq)]
@@ -132,6 +132,18 @@ impl CameraIntrinsics {
             _ => normalized, // Pass-through for milestone one; platform-provided coefficients stored only.
         }
     }
+
+    /// Returns true when the intrinsics carry a non-trivial distortion model.
+    pub fn has_distortion(&self) -> bool {
+        !matches!(self.distortion, DistortionModel::None)
+    }
+
+    /// Builds the column-major 3x3 camera matrix often referred to as `K`.
+    pub fn matrix(&self) -> Matrix3<f64> {
+        Matrix3::new(
+            self.fx, self.skew, self.cx, 0.0, self.fy, self.cy, 0.0, 0.0, 1.0,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -207,5 +219,34 @@ mod tests {
         }
 
         assert_relative_eq!(jacobian, numeric, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn intrinsic_matrix_layout_matches_definition() {
+        let intrinsics = CameraIntrinsics::new(
+            800.0,
+            820.0,
+            400.0,
+            300.0,
+            5.0,
+            1280,
+            720,
+            DistortionModel::BrownConrady {
+                k1: 0.1,
+                k2: 0.01,
+                p1: 0.0,
+                p2: 0.0,
+                k3: 0.0,
+            },
+        );
+
+        let matrix = intrinsics.matrix();
+        assert_relative_eq!(matrix[(0, 0)], 800.0, epsilon = 1e-12);
+        assert_relative_eq!(matrix[(0, 1)], 5.0, epsilon = 1e-12);
+        assert_relative_eq!(matrix[(0, 2)], 400.0, epsilon = 1e-12);
+        assert_relative_eq!(matrix[(1, 0)], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(matrix[(1, 1)], 820.0, epsilon = 1e-12);
+        assert_relative_eq!(matrix[(1, 2)], 300.0, epsilon = 1e-12);
+        assert!(intrinsics.has_distortion());
     }
 }

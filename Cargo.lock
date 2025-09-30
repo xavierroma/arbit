@@ -39,6 +39,7 @@ name = "arbit-providers"
 version = "0.1.0"
 dependencies = [
  "arbit-core",
+ "nalgebra",
 ]
 
 [[package]]

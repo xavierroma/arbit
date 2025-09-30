@@ -6,6 +6,7 @@ use arbit_core::{
     math::{CameraIntrinsics, DistortionModel},
     time::{FrameTimestamps, SystemClock, TimestampPolicy},
 };
+use nalgebra::Matrix3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PixelFormat {
@@ -23,6 +24,20 @@ pub struct CameraSample {
     pub pixel_format: PixelFormat,
     pub bytes_per_row: usize,
     pub data: Arc<[u8]>,
+}
+
+impl CameraSample {
+    pub fn intrinsic_matrix(&self) -> Matrix3<f64> {
+        self.intrinsics.matrix()
+    }
+
+    pub fn resolution(&self) -> (u32, u32) {
+        (self.intrinsics.width, self.intrinsics.height)
+    }
+
+    pub fn has_distortion(&self) -> bool {
+        self.intrinsics.has_distortion()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -165,5 +180,17 @@ mod tests {
             DistortionModel::Custom(_)
         ));
         assert_eq!(sample.timestamps.latency, Duration::from_millis(3));
+
+        let (width, height) = sample.resolution();
+        assert_eq!(width, 800);
+        assert_eq!(height, 600);
+        assert!(sample.has_distortion());
+
+        let matrix = sample.intrinsic_matrix();
+        assert_eq!(matrix[(0, 0)], 800.0);
+        assert_eq!(matrix[(0, 1)], 0.0);
+        assert_eq!(matrix[(0, 2)], 400.0);
+        assert_eq!(matrix[(1, 1)], 820.0);
+        assert_eq!(matrix[(1, 2)], 300.0);
     }
 }

@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 arbit-core = { path = "../arbit-core" }
+nalgebra = "0.34.1"
