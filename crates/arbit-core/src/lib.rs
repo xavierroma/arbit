@@ -1,7 +1,7 @@
 pub mod adapters;
+pub mod img;
 pub mod math;
 pub mod time;
-
 
 #[cfg(test)]
 mod tests {
@@ -54,10 +54,7 @@ mod tests {
             }
         }
 
-        let clock = MockClock::new(vec![
-            Duration::from_millis(12),
-            Duration::from_millis(11),
-        ]);
+        let clock = MockClock::new(vec![Duration::from_millis(12), Duration::from_millis(11)]);
         let mut policy = TimestampPolicy::with_clock(clock);
 
         let sample_a = policy.ingest_capture(Duration::from_millis(10));
