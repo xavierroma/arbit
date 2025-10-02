@@ -149,6 +149,12 @@ impl VoLoop {
     pub fn log(&self) -> &ReplayLog {
         &self.log
     }
+
+    pub fn reset(&mut self) {
+        self.metrics = VoMetrics::default();
+        self.log = ReplayLog::default();
+        self.consecutive_losses = 0;
+    }
 }
 
 #[cfg(test)]

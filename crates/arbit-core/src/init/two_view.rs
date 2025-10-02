@@ -32,6 +32,7 @@ pub struct TwoViewInitialization {
     pub translation: Vector3<f64>,
     pub inliers: Vec<usize>,
     pub average_sampson_error: f64,
+    pub landmarks: Vec<(usize, Point3<f64>)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -106,6 +107,26 @@ impl TwoViewInitializer {
         let decomposition = choose_pose(&refined_e, &inlier_matches)?;
         let (avg_error, final_inliers) = evaluate_model(matches, &refined_e, self.params.threshold);
 
+        let identity_projection =
+            Matrix3x4::new(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+        let candidate_projection =
+            compose_projection(&decomposition.rotation, &decomposition.translation);
+
+        let mut landmarks = Vec::with_capacity(final_inliers.len());
+        for &idx in &final_inliers {
+            if let Some(point) =
+                triangulate(&identity_projection, &candidate_projection, &matches[idx])
+            {
+                landmarks.push((idx, point));
+            }
+        }
+
+        debug!(
+            "Two-view initialization landmarks: {} / {}",
+            landmarks.len(),
+            final_inliers.len()
+        );
+
         debug!(
             "Two-view initialization successful: {} final inliers, avg error: {:.6}",
             final_inliers.len(),
@@ -118,7 +139,26 @@ impl TwoViewInitializer {
             translation: decomposition.translation,
             inliers: final_inliers,
             average_sampson_error: avg_error,
+            landmarks,
         })
+    }
+}
+
+impl TwoViewInitialization {
+    pub fn scaled(&self, scale: f64) -> Self {
+        let mut scaled = self.clone();
+        scaled.translation *= scale;
+        scaled.landmarks = self
+            .landmarks
+            .iter()
+            .map(|(index, point)| {
+                (
+                    *index,
+                    Point3::new(point.x * scale, point.y * scale, point.z * scale),
+                )
+            })
+            .collect();
+        scaled
     }
 }
 
@@ -392,6 +432,8 @@ mod tests {
             .expect("two view initialization");
         assert!(result.inliers.len() >= 80);
         assert!(result.average_sampson_error < 1e-3);
+        assert!(!result.landmarks.is_empty());
+        let first_landmark_index = result.landmarks[0].0;
 
         assert_relative_eq!(result.rotation.matrix(), rotation.matrix(), epsilon = 1e-2);
         assert_relative_eq!(
@@ -399,6 +441,21 @@ mod tests {
             translation.normalize(),
             epsilon = 1e-2
         );
+
+        let scaled = result.scaled(0.5);
+        assert_eq!(scaled.landmarks.len(), result.landmarks.len());
+        assert!(scaled.translation.norm() < result.translation.norm());
+        let scaled_first = scaled
+            .landmarks
+            .iter()
+            .find(|(idx, _)| *idx == first_landmark_index)
+            .expect("scaled landmark");
+        let original_first = result
+            .landmarks
+            .iter()
+            .find(|(idx, _)| *idx == first_landmark_index)
+            .unwrap();
+        assert!(scaled_first.1.coords.norm() < original_first.1.coords.norm());
     }
 
     #[test]
