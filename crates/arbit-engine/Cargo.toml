@@ -1,0 +1,11 @@
+[package]
+name = "arbit-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arbit-core = { path = "../arbit-core" }
+arbit-providers = { path = "../arbit-providers" }
+log = "0.4"
+thiserror = "1.0"
+nalgebra = "0.34.1"

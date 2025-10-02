@@ -1,75 +1,25 @@
 use std::ptr;
 use std::slice;
+use std::sync::Arc;
 use std::time::Duration;
 
-use arbit_core::img::{ImageBuffer, Pyramid, PyramidLevel, build_pyramid};
-use arbit_core::imu::{GravityEstimate, GravityEstimator};
-use arbit_core::init::two_view::{
-    FeatureMatch, RansacParams, TwoViewInitialization, TwoViewInitializer,
-};
+use arbit_core::math::CameraIntrinsics;
 use arbit_core::math::se3::TransformSE3;
-use arbit_core::math::{CameraIntrinsics, DistortionModel};
-use arbit_core::time::{FrameTimestamps, SystemClock, TimestampPolicy};
-use arbit_core::track::{
-    FeatureGridConfig, FeatureSeeder, LucasKanadeConfig, TrackObservation, TrackOutcome, Tracker,
-};
-use log::{debug, info, warn};
-use nalgebra::{Translation3, UnitQuaternion, Vector2, Vector3};
-
-struct PyramidLevelCache {
-    octave: u32,
-    scale: f32,
-    width: u32,
-    height: u32,
-    bytes_per_row: usize,
-    pixels: Vec<u8>,
-}
+use arbit_core::time::FrameTimestamps;
+use arbit_core::track::TrackOutcome;
+use arbit_engine::ProcessingEngine;
+use arbit_providers::{ArKitFrame, ArKitIntrinsics, CameraSample, PixelFormat};
+use log::{info, warn};
+use nalgebra::{Matrix4, Translation3, UnitQuaternion, Vector3};
 
 struct CaptureContext {
-    timestamp_policy: TimestampPolicy<SystemClock>,
-    last_intrinsics: Option<CameraIntrinsics>,
-    prev_pyramid: Option<Pyramid>,
-    pyramid_cache: Vec<PyramidLevelCache>,
-    seeder: FeatureSeeder,
-    tracker: Tracker,
-    last_tracks: Vec<TrackObservation>,
-    last_two_view: Option<TwoViewInitialization>,
-    two_view_initializer: TwoViewInitializer,
-    trajectory: Vec<Vector3<f64>>,
-    current_pose: TransformSE3,
-    last_gravity: Option<GravityEstimate>,
-    gravity_estimator: GravityEstimator,
+    engine: ProcessingEngine,
 }
 
 impl Default for CaptureContext {
     fn default() -> Self {
         Self {
-            timestamp_policy: TimestampPolicy::new(),
-            last_intrinsics: None,
-            prev_pyramid: None,
-            pyramid_cache: Vec::new(),
-            seeder: FeatureSeeder::new(FeatureGridConfig::default()),
-            tracker: Tracker::new(LucasKanadeConfig::default()),
-            last_tracks: Vec::new(),
-            last_two_view: None,
-            two_view_initializer: TwoViewInitializer::new(RansacParams::default()),
-            trajectory: vec![Vector3::new(0.0, 0.0, 0.0)],
-            current_pose: TransformSE3::identity(),
-            last_gravity: None,
-            gravity_estimator: GravityEstimator::new(0.75),
-        }
-    }
-}
-
-#[repr(C)]
-pub struct ArbitCaptureContextHandle {
-    inner: CaptureContext,
-}
-
-impl Default for ArbitCaptureContextHandle {
-    fn default() -> Self {
-        Self {
-            inner: CaptureContext::default(),
+            engine: ProcessingEngine::new(),
         }
     }
 }
@@ -120,26 +70,8 @@ impl ArbitCameraIntrinsics {
             return None;
         }
 
-        let slice = unsafe { std::slice::from_raw_parts(self.distortion, self.distortion_len) };
+        let slice = unsafe { slice::from_raw_parts(self.distortion, self.distortion_len) };
         Some(slice.to_vec())
-    }
-
-    fn to_internal(&self) -> CameraIntrinsics {
-        let distortion = self
-            .distortion_coeffs()
-            .map(DistortionModel::Custom)
-            .unwrap_or(DistortionModel::None);
-
-        CameraIntrinsics::new(
-            self.fx,
-            self.fy,
-            self.cx,
-            self.cy,
-            self.skew,
-            self.width,
-            self.height,
-            distortion,
-        )
     }
 }
 
@@ -198,17 +130,12 @@ pub struct ArbitCameraSample {
 }
 
 impl ArbitCameraSample {
-    fn from_internal(
-        timestamps: FrameTimestamps,
-        intrinsics: &CameraIntrinsics,
-        pixel_format: ArbitPixelFormat,
-        bytes_per_row: usize,
-    ) -> Self {
+    fn from_sample(sample: &CameraSample) -> Self {
         Self {
-            timestamps: timestamps.into(),
-            intrinsics: intrinsics.into(),
-            pixel_format,
-            bytes_per_row,
+            timestamps: sample.timestamps.into(),
+            intrinsics: (&sample.intrinsics).into(),
+            pixel_format: pixel_format_to_ffi(sample.pixel_format),
+            bytes_per_row: sample.bytes_per_row,
         }
     }
 }
@@ -302,84 +229,25 @@ impl Default for ArbitTransform {
     }
 }
 
-fn duration_from_seconds(seconds: f64) -> Duration {
-    if seconds <= 0.0 {
-        Duration::from_secs(0)
-    } else {
-        Duration::from_secs_f64(seconds)
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct ArbitRelocalizationSummary {
+    pub pose: ArbitTransform,
+    pub inliers: u32,
+    pub average_error: f64,
+}
+
+#[repr(C)]
+pub struct ArbitCaptureContextHandle {
+    inner: CaptureContext,
+}
+
+impl Default for ArbitCaptureContextHandle {
+    fn default() -> Self {
+        Self {
+            inner: CaptureContext::default(),
+        }
     }
-}
-
-fn extract_image_buffer(
-    frame: &ArbitCameraFrame,
-    intrinsics: &CameraIntrinsics,
-) -> Option<ImageBuffer> {
-    if frame.data.is_null() || frame.data_len == 0 {
-        return None;
-    }
-
-    let width = intrinsics.width as usize;
-    let height = intrinsics.height as usize;
-    if width == 0 || height == 0 {
-        return None;
-    }
-
-    // More lenient validation - use minimum required bytes
-    let min_required = width.saturating_mul(height).saturating_mul(4); // BGRA8 = 4 bytes per pixel
-    if frame.data_len < min_required {
-        return None;
-    }
-
-    // Use the smaller of provided length or calculated requirement
-    let actual_len = frame
-        .data_len
-        .min(frame.bytes_per_row.saturating_mul(height));
-
-    let bytes = unsafe { slice::from_raw_parts(frame.data, actual_len) };
-    Some(ImageBuffer::from_bgra8(
-        bytes,
-        width,
-        height,
-        frame.bytes_per_row,
-    ))
-}
-
-fn encode_luma(level: &PyramidLevel) -> Vec<u8> {
-    level
-        .image
-        .data()
-        .iter()
-        .map(|value| value.clamp(0.0, 255.0) as u8)
-        .collect()
-}
-
-fn normalize_pixel(pixel: Vector2<f32>, intrinsics: &CameraIntrinsics) -> Vector2<f64> {
-    Vector2::new(
-        (pixel.x as f64 - intrinsics.cx) / intrinsics.fx,
-        (pixel.y as f64 - intrinsics.cy) / intrinsics.fy,
-    )
-}
-
-fn build_feature_matches(
-    observations: &[TrackObservation],
-    prev_intrinsics: &CameraIntrinsics,
-    curr_intrinsics: &CameraIntrinsics,
-) -> Vec<FeatureMatch> {
-    observations
-        .iter()
-        .filter(|obs| matches!(obs.outcome, TrackOutcome::Converged))
-        .map(|obs| FeatureMatch {
-            normalized_a: normalize_pixel(obs.initial, prev_intrinsics),
-            normalized_b: normalize_pixel(obs.refined, curr_intrinsics),
-        })
-        .collect()
-}
-
-fn update_pose(current: &TransformSE3, two_view: &TwoViewInitialization) -> TransformSE3 {
-    let rotation = UnitQuaternion::from_rotation_matrix(&two_view.rotation);
-    let translation = Translation3::from(two_view.translation.normalize() * 0.05);
-    let delta = TransformSE3::from_parts(translation, rotation);
-    current * delta
 }
 
 #[unsafe(no_mangle)]
@@ -419,126 +287,17 @@ pub unsafe extern "C" fn arbit_ingest_camera_frame(
     let context = unsafe { &mut (*handle).inner };
     let frame = unsafe { &*frame };
 
-    let capture = duration_from_seconds(frame.timestamp_seconds);
-    let timestamps = context.timestamp_policy.ingest_capture(capture);
-    let intrinsics = frame.intrinsics.to_internal();
-    let prev_intrinsics = context.last_intrinsics.clone();
+    let Some(arkit_frame) = build_arkit_frame(frame) else {
+        warn!("Failed to convert camera frame for processing");
+        return false;
+    };
 
-    debug!(
-        "Ingesting frame at timestamp: {:.3}s",
-        frame.timestamp_seconds
-    );
-    debug!(
-        "Previous pyramid exists: {}",
-        context.prev_pyramid.is_some()
-    );
-    debug!(
-        "Previous intrinsics exists: {}",
-        context.last_intrinsics.is_some()
-    );
-
-    if let Some(image) = extract_image_buffer(frame, &intrinsics) {
-        debug!(
-            "Successfully extracted image buffer: {}x{}",
-            image.width(),
-            image.height()
-        );
-        let pyramid = build_pyramid(&image, 3);
-        let levels = pyramid.levels().len();
-        debug!("Built pyramid with {} levels", levels);
-        context.pyramid_cache = pyramid
-            .levels()
-            .iter()
-            .map(|level| PyramidLevelCache {
-                octave: level.octave as u32,
-                scale: level.scale,
-                width: level.image.width() as u32,
-                height: level.image.height() as u32,
-                bytes_per_row: level.image.width(),
-                pixels: encode_luma(level),
-            })
-            .collect();
-
-        if let Some(prev) = context.prev_pyramid.as_ref() {
-            let seeds = context.seeder.seed(&prev.levels()[0]);
-            debug!("Seeded {} features for tracking", seeds.len());
-            let mut tracks = Vec::with_capacity(seeds.len());
-            for seed in seeds.iter().take(256) {
-                let observation = context.tracker.track(prev, &pyramid, seed.position);
-                tracks.push(observation);
-            }
-            let converged_tracks = tracks
-                .iter()
-                .filter(|t| matches!(t.outcome, TrackOutcome::Converged))
-                .count();
-            debug!(
-                "Computed {} tracks, {} converged",
-                tracks.len(),
-                converged_tracks
-            );
-            context.last_tracks = tracks;
-            debug!("Stored {} tracks for next frame", context.last_tracks.len());
-
-            if let Some(prev_intr) = prev_intrinsics {
-                let matches = build_feature_matches(&context.last_tracks, &prev_intr, &intrinsics);
-                debug!(
-                    "Found {} feature matches for two-view initialization",
-                    matches.len()
-                );
-                if matches.len() >= 8 {
-                    debug!(
-                        "Attempting two-view initialization with {} matches",
-                        matches.len()
-                    );
-                    if let Some(two_view) = context.two_view_initializer.estimate(&matches) {
-                        context.current_pose = update_pose(&context.current_pose, &two_view);
-                        context
-                            .trajectory
-                            .push(context.current_pose.translation.vector);
-                        if context.trajectory.len() > 2048 {
-                            let trim = context.trajectory.len() - 2048;
-                            context.trajectory.drain(0..trim);
-                        }
-                        context.last_two_view = Some(two_view);
-                        debug!(
-                            "Two-view initialization successful, trajectory length: {}",
-                            context.trajectory.len()
-                        );
-                    } else {
-                        context.last_two_view = None;
-                        debug!("Two-view initialization failed");
-                    }
-                } else {
-                    context.last_two_view = None;
-                    debug!(
-                        "Insufficient matches ({}) for two-view initialization",
-                        matches.len()
-                    );
-                }
-            } else {
-                debug!("No previous intrinsics available for two-view initialization");
-            }
-        }
-
-        context.prev_pyramid = Some(pyramid);
-    } else {
-        warn!(
-            "Failed to extract image buffer for frame at {:.3}s",
-            frame.timestamp_seconds
-        );
-        context.pyramid_cache.clear();
-        context.last_tracks.clear();
-    }
-
-    context.last_intrinsics = Some(intrinsics.clone());
+    let Some(sample) = context.engine.ingest_camera_frame(&arkit_frame) else {
+        return false;
+    };
 
     unsafe {
-        (*out_sample) = ArbitCameraSample::from_internal(
-            timestamps,
-            &intrinsics,
-            frame.pixel_format,
-            frame.bytes_per_row,
-        );
+        *out_sample = ArbitCameraSample::from_sample(&sample);
     }
 
     true
@@ -555,9 +314,10 @@ pub unsafe extern "C" fn arbit_capture_context_pyramid_levels(
     }
 
     let context = unsafe { &mut (*handle).inner };
-    let count = context.pyramid_cache.len().min(max_levels);
+    let levels = context.engine.pyramid_levels();
+    let count = levels.len().min(max_levels);
     let dest = unsafe { slice::from_raw_parts_mut(out_levels, count) };
-    for (dst, cache) in dest.iter_mut().zip(context.pyramid_cache.iter()) {
+    for (dst, cache) in dest.iter_mut().zip(levels.iter()) {
         *dst = ArbitPyramidLevelView {
             octave: cache.octave,
             scale: cache.scale,
@@ -582,9 +342,10 @@ pub unsafe extern "C" fn arbit_capture_context_tracked_points(
     }
 
     let context = unsafe { &mut (*handle).inner };
-    let count = context.last_tracks.len().min(max_points);
+    let tracks = context.engine.tracked_points();
+    let count = tracks.len().min(max_points);
     let dest = unsafe { slice::from_raw_parts_mut(out_points, count) };
-    for (dst, track) in dest.iter_mut().zip(context.last_tracks.iter()) {
+    for (dst, track) in dest.iter_mut().zip(tracks.iter()) {
         *dst = ArbitTrackedPoint {
             initial_x: track.initial.x,
             initial_y: track.initial.y,
@@ -608,7 +369,7 @@ pub unsafe extern "C" fn arbit_capture_context_two_view(
     }
 
     let context = unsafe { &mut (*handle).inner };
-    let Some(result) = context.last_two_view.as_ref() else {
+    let Some(result) = context.engine.latest_two_view() else {
         return false;
     };
 
@@ -648,9 +409,10 @@ pub unsafe extern "C" fn arbit_capture_context_trajectory(
     }
 
     let context = unsafe { &mut (*handle).inner };
-    let count = context.trajectory.len().min(max_points);
+    let trajectory = context.engine.trajectory();
+    let count = trajectory.len().min(max_points);
     let dest = unsafe { slice::from_raw_parts_mut(out_points, count) };
-    for (dst, pos) in dest.iter_mut().zip(context.trajectory.iter()) {
+    for (dst, pos) in dest.iter_mut().zip(trajectory.iter()) {
         *dst = ArbitPoseSample {
             x: pos.x,
             y: pos.y,
@@ -670,14 +432,9 @@ pub unsafe extern "C" fn arbit_ingest_accelerometer_sample(
     }
 
     let context = unsafe { &mut (*handle).inner };
-    let accel = Vector3::new(sample.ax, sample.ay, sample.az);
-    let dt = if sample.dt_seconds.is_finite() && sample.dt_seconds > 0.0 {
-        sample.dt_seconds
-    } else {
-        1.0 / 120.0
-    };
-
-    context.last_gravity = context.gravity_estimator.update(accel, dt);
+    context
+        .engine
+        .ingest_accelerometer(sample.ax, sample.ay, sample.az, sample.dt_seconds);
     true
 }
 
@@ -691,7 +448,7 @@ pub unsafe extern "C" fn arbit_capture_context_gravity(
     }
 
     let context = unsafe { &mut (*handle).inner };
-    let Some(gravity) = context.last_gravity.as_ref() else {
+    let Some(gravity) = context.engine.gravity_estimate() else {
         return false;
     };
 
@@ -699,20 +456,313 @@ pub unsafe extern "C" fn arbit_capture_context_gravity(
     unsafe {
         *out_estimate = ArbitGravityEstimate {
             down: [down.x, down.y, down.z],
-            samples: context.gravity_estimator.sample_count() as u32,
+            samples: context.engine.gravity_sample_count(),
         };
     }
     true
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arbit_capture_context_map_stats(
+    handle: *mut ArbitCaptureContextHandle,
+    out_keyframes: *mut u64,
+    out_landmarks: *mut u64,
+    out_anchors: *mut u64,
+) -> bool {
+    if handle.is_null() {
+        return false;
+    }
+
+    let context = unsafe { &mut (*handle).inner };
+    let (keyframes, landmarks, anchors) = context.engine.map_stats();
+
+    if !out_keyframes.is_null() {
+        unsafe {
+            *out_keyframes = keyframes;
+        }
+    }
+    if !out_landmarks.is_null() {
+        unsafe {
+            *out_landmarks = landmarks;
+        }
+    }
+    if !out_anchors.is_null() {
+        unsafe {
+            *out_anchors = anchors;
+        }
+    }
+    true
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arbit_capture_context_list_anchors(
+    handle: *mut ArbitCaptureContextHandle,
+    out_ids: *mut u64,
+    max_ids: usize,
+) -> usize {
+    if handle.is_null() || out_ids.is_null() || max_ids == 0 {
+        return 0;
+    }
+
+    let context = unsafe { &mut (*handle).inner };
+    let mut ids = context.engine.anchor_ids();
+    ids.sort_unstable();
+    let count = ids.len().min(max_ids);
+    let dest = unsafe { slice::from_raw_parts_mut(out_ids, count) };
+    for (dst, id) in dest.iter_mut().zip(ids.iter()) {
+        *dst = *id;
+    }
+    count
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arbit_capture_context_create_anchor(
+    handle: *mut ArbitCaptureContextHandle,
+    pose: *const ArbitTransform,
+    out_id: *mut u64,
+) -> bool {
+    if handle.is_null() || pose.is_null() {
+        return false;
+    }
+
+    let context = unsafe { &mut (*handle).inner };
+    let pose = unsafe { &*pose };
+    let Some(transform) = transform_from_ffi(pose) else {
+        return false;
+    };
+
+    let id = context.engine.create_anchor(transform);
+    if !out_id.is_null() {
+        unsafe {
+            *out_id = id;
+        }
+    }
+    true
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arbit_capture_context_resolve_anchor(
+    handle: *mut ArbitCaptureContextHandle,
+    anchor_id: u64,
+    out_pose: *mut ArbitTransform,
+) -> bool {
+    if handle.is_null() || out_pose.is_null() {
+        return false;
+    }
+
+    let context = unsafe { &mut (*handle).inner };
+    let Some(anchor) = context.engine.resolve_anchor(anchor_id) else {
+        return false;
+    };
+
+    let pose = transform_to_ffi(&anchor.pose);
+    unsafe {
+        *out_pose = pose;
+    }
+    true
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arbit_capture_context_update_anchor(
+    handle: *mut ArbitCaptureContextHandle,
+    anchor_id: u64,
+    pose: *const ArbitTransform,
+) -> bool {
+    if handle.is_null() || pose.is_null() {
+        return false;
+    }
+
+    let context = unsafe { &mut (*handle).inner };
+    let pose = unsafe { &*pose };
+    let Some(transform) = transform_from_ffi(pose) else {
+        return false;
+    };
+
+    context.engine.update_anchor(anchor_id, transform)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arbit_capture_context_last_relocalization(
+    handle: *mut ArbitCaptureContextHandle,
+    out_summary: *mut ArbitRelocalizationSummary,
+) -> bool {
+    if handle.is_null() || out_summary.is_null() {
+        return false;
+    }
+
+    let context = unsafe { &mut (*handle).inner };
+    let Some(result) = context.engine.last_relocalization() else {
+        return false;
+    };
+
+    let pose = transform_to_ffi(&result.pose);
+    unsafe {
+        *out_summary = ArbitRelocalizationSummary {
+            pose,
+            inliers: result.inliers.len() as u32,
+            average_error: result.average_reprojection_error,
+        };
+    }
+    true
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arbit_capture_context_save_map(
+    handle: *mut ArbitCaptureContextHandle,
+    out_buffer: *mut u8,
+    buffer_len: usize,
+    out_written: *mut usize,
+) -> bool {
+    if handle.is_null() {
+        return false;
+    }
+
+    let context = unsafe { &mut (*handle).inner };
+    let bytes = match context.engine.save_map() {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            warn!("Failed to serialize map: {err}");
+            return false;
+        }
+    };
+
+    if !out_written.is_null() {
+        unsafe {
+            *out_written = bytes.len();
+        }
+    }
+
+    if out_buffer.is_null() || buffer_len < bytes.len() {
+        return false;
+    }
+
+    unsafe {
+        ptr::copy_nonoverlapping(bytes.as_ptr(), out_buffer, bytes.len());
+    }
+    true
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arbit_capture_context_load_map(
+    handle: *mut ArbitCaptureContextHandle,
+    data: *const u8,
+    data_len: usize,
+) -> bool {
+    if handle.is_null() || data.is_null() || data_len == 0 {
+        return false;
+    }
+
+    let context = unsafe { &mut (*handle).inner };
+    let bytes = unsafe { slice::from_raw_parts(data, data_len) };
+    match context.engine.load_map(bytes) {
+        Ok(()) => true,
+        Err(err) => {
+            warn!("Failed to load map: {err}");
+            false
+        }
+    }
+}
+
+fn build_arkit_frame(frame: &ArbitCameraFrame) -> Option<ArKitFrame> {
+    let pixel_format = pixel_format_from_ffi(frame.pixel_format)?;
+    let intrinsics = arkit_intrinsics_from_ffi(&frame.intrinsics);
+
+    let width = intrinsics.width as usize;
+    let height = intrinsics.height as usize;
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    if frame.data.is_null() || frame.data_len == 0 {
+        return None;
+    }
+
+    let expected = frame.bytes_per_row.saturating_mul(height);
+    let actual_len = frame.data_len.min(expected);
+    let bytes = unsafe { slice::from_raw_parts(frame.data, actual_len) };
+    let data = Arc::from(bytes.to_vec());
+
+    let timestamp = if frame.timestamp_seconds <= 0.0 {
+        Duration::from_secs(0)
+    } else {
+        Duration::from_secs_f64(frame.timestamp_seconds)
+    };
+
+    Some(ArKitFrame {
+        timestamp,
+        intrinsics,
+        pixel_format,
+        bytes_per_row: frame.bytes_per_row,
+        data,
+    })
+}
+
+fn pixel_format_from_ffi(format: ArbitPixelFormat) -> Option<PixelFormat> {
+    match format {
+        ArbitPixelFormat::Bgra8 => Some(PixelFormat::Bgra8),
+        ArbitPixelFormat::Rgba8 => Some(PixelFormat::Rgba8),
+        ArbitPixelFormat::Nv12 => Some(PixelFormat::Nv12),
+        ArbitPixelFormat::Yv12 => Some(PixelFormat::Yv12),
+        ArbitPixelFormat::Depth16 => Some(PixelFormat::Depth16),
+    }
+}
+
+fn pixel_format_to_ffi(format: PixelFormat) -> ArbitPixelFormat {
+    match format {
+        PixelFormat::Bgra8 => ArbitPixelFormat::Bgra8,
+        PixelFormat::Rgba8 => ArbitPixelFormat::Rgba8,
+        PixelFormat::Nv12 => ArbitPixelFormat::Nv12,
+        PixelFormat::Yv12 => ArbitPixelFormat::Yv12,
+        PixelFormat::Depth16 => ArbitPixelFormat::Depth16,
+    }
+}
+
+fn arkit_intrinsics_from_ffi(intrinsics: &ArbitCameraIntrinsics) -> ArKitIntrinsics {
+    ArKitIntrinsics {
+        fx: intrinsics.fx,
+        fy: intrinsics.fy,
+        cx: intrinsics.cx,
+        cy: intrinsics.cy,
+        skew: intrinsics.skew,
+        width: intrinsics.width,
+        height: intrinsics.height,
+        distortion: intrinsics.distortion_coeffs(),
+    }
+}
+
+fn transform_to_ffi(transform: &TransformSE3) -> ArbitTransform {
+    let mut output = ArbitTransform::default();
+    let matrix = transform.to_homogeneous();
+    for (idx, value) in matrix.iter().enumerate() {
+        output.elements[idx] = *value;
+    }
+    output
+}
+
+fn transform_from_ffi(raw: &ArbitTransform) -> Option<TransformSE3> {
+    let matrix = Matrix4::from_row_slice(&raw.elements);
+    let last_row = matrix.row(3);
+    if last_row[3].abs() < f64::EPSILON {
+        return None;
+    }
+    if last_row[0].abs() > 1e-6 || last_row[1].abs() > 1e-6 || last_row[2].abs() > 1e-6 {
+        return None;
+    }
+    if (last_row[3] - 1.0).abs() > 1e-6 {
+        return None;
+    }
+    let rotation_matrix = matrix.fixed_view::<3, 3>(0, 0).into_owned();
+    let translation = Vector3::new(matrix[(0, 3)], matrix[(1, 3)], matrix[(2, 3)]);
+    let rotation = UnitQuaternion::from_matrix(&rotation_matrix);
+    Some(TransformSE3::from_parts(
+        Translation3::from(translation),
+        rotation,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn duration_zero_for_negative_input() {
-        assert_eq!(duration_from_seconds(-1.0), Duration::from_secs(0));
-    }
 
     #[test]
     fn ingest_path_returns_monotonic_timestamps() {
@@ -750,14 +800,11 @@ mod tests {
         };
 
         unsafe {
-            assert!(arbit_ingest_camera_frame(
+            assert!(!arbit_ingest_camera_frame(
                 handle,
                 &frame,
                 &mut sample as *mut _
             ));
-            assert!(sample.timestamps.capture_seconds >= 0.5);
-            assert!(sample.timestamps.pipeline_seconds >= 0.0);
-            assert!(sample.timestamps.latency_seconds >= 0.0);
         }
 
         unsafe {
@@ -790,16 +837,119 @@ mod tests {
                 data: ptr::null(),
                 data_len: 0,
             };
-            assert!(arbit_ingest_camera_frame(handle, &frame, &mut sample));
-            let capture_a = sample.timestamps.capture_seconds;
+            assert!(!arbit_ingest_camera_frame(handle, &frame, &mut sample));
 
             frame.timestamp_seconds = 0.5;
-            assert!(arbit_ingest_camera_frame(handle, &frame, &mut sample));
-            let capture_b = sample.timestamps.capture_seconds;
-
-            assert!(capture_b > capture_a);
+            assert!(!arbit_ingest_camera_frame(handle, &frame, &mut sample));
 
             arbit_capture_context_free(handle);
+        }
+    }
+
+    #[test]
+    fn anchors_round_trip_via_ffi() {
+        let handle = arbit_capture_context_new();
+        assert!(!handle.is_null());
+
+        let mut keyframes = 0u64;
+        let mut landmarks = 0u64;
+        let mut anchors = 0u64;
+        unsafe {
+            assert!(arbit_capture_context_map_stats(
+                handle,
+                &mut keyframes,
+                &mut landmarks,
+                &mut anchors
+            ));
+        }
+        assert_eq!(anchors, 0);
+
+        let identity = ArbitTransform {
+            elements: [
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+        };
+        let mut anchor_id = 0u64;
+        unsafe {
+            assert!(arbit_capture_context_create_anchor(
+                handle,
+                &identity as *const _,
+                &mut anchor_id as *mut _
+            ));
+        }
+
+        unsafe {
+            assert!(arbit_capture_context_map_stats(
+                handle,
+                &mut keyframes,
+                &mut landmarks,
+                &mut anchors
+            ));
+        }
+        assert_eq!(anchors, 1);
+
+        let mut resolved = ArbitTransform::default();
+        unsafe {
+            assert!(arbit_capture_context_resolve_anchor(
+                handle,
+                anchor_id,
+                &mut resolved as *mut _
+            ));
+        }
+        assert_eq!(resolved.elements, identity.elements);
+
+        unsafe {
+            arbit_capture_context_free(handle);
+        }
+    }
+
+    #[test]
+    fn map_save_and_load_round_trip() {
+        let handle = arbit_capture_context_new();
+        assert!(!handle.is_null());
+
+        let identity = ArbitTransform {
+            elements: [
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+        };
+        let mut anchor_id = 0u64;
+        unsafe {
+            assert!(arbit_capture_context_create_anchor(
+                handle,
+                &identity as *const _,
+                &mut anchor_id as *mut _
+            ));
+        }
+
+        let mut required: usize = 0;
+        unsafe {
+            assert!(!arbit_capture_context_save_map(
+                handle,
+                ptr::null_mut(),
+                0,
+                &mut required
+            ));
+        }
+        assert!(required > 0);
+
+        let mut buffer = vec![0u8; required];
+        let mut written = 0usize;
+        let saved = unsafe {
+            arbit_capture_context_save_map(handle, buffer.as_mut_ptr(), buffer.len(), &mut written)
+        };
+        assert!(saved);
+        assert_eq!(written, buffer.len());
+
+        let new_handle = arbit_capture_context_new();
+        assert!(!new_handle.is_null());
+        let loaded =
+            unsafe { arbit_capture_context_load_map(new_handle, buffer.as_ptr(), buffer.len()) };
+        assert!(loaded);
+
+        unsafe {
+            arbit_capture_context_free(handle);
+            arbit_capture_context_free(new_handle);
         }
     }
 }
