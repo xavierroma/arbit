@@ -3,8 +3,8 @@ set -euo pipefail
 
 crate_root="$(cd -- "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 workspace_root="$(cd -- "${crate_root}/../.." && pwd)"
-headers_dir="${crate_root}/include"
-output_root="${1:-${workspace_root}/examples/ios-libs}"    # default alongside example assets
+headers_dir="${crate_root}/swift-package/include"
+output_root="${1:-${crate_root}/swift-package}"    # default alongside packaged Swift sources
 artifact_name="ArbitFFI"
 config="release"
 crate_package="arbit-swift"

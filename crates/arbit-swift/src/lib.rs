@@ -12,11 +12,16 @@
 pub use arbit_ffi::{
     ArbitAccelerometerSample, ArbitCameraFrame, ArbitCameraIntrinsics, ArbitCameraSample,
     ArbitCaptureContextHandle, ArbitFrameTimestamps, ArbitGravityEstimate, ArbitPixelFormat,
-    ArbitPoseSample, ArbitPyramidLevelView, ArbitTrackStatus, ArbitTrackedPoint, ArbitTransform,
-    ArbitTwoViewSummary, arbit_capture_context_free, arbit_capture_context_gravity,
-    arbit_capture_context_new, arbit_capture_context_pyramid_levels,
-    arbit_capture_context_tracked_points, arbit_capture_context_trajectory,
-    arbit_capture_context_two_view, arbit_ingest_accelerometer_sample, arbit_ingest_camera_frame,
+    ArbitPoseSample, ArbitPyramidLevelView, ArbitRelocalizationSummary, ArbitTrackStatus,
+    ArbitTrackedPoint, ArbitTransform, ArbitTwoViewSummary, arbit_capture_context_create_anchor,
+    arbit_capture_context_free, arbit_capture_context_gravity,
+    arbit_capture_context_last_relocalization, arbit_capture_context_list_anchors,
+    arbit_capture_context_load_map, arbit_capture_context_map_stats, arbit_capture_context_new,
+    arbit_capture_context_pyramid_levels, arbit_capture_context_resolve_anchor,
+    arbit_capture_context_save_map, arbit_capture_context_tracked_points,
+    arbit_capture_context_trajectory, arbit_capture_context_two_view,
+    arbit_capture_context_update_anchor, arbit_ingest_accelerometer_sample,
+    arbit_ingest_camera_frame,
 };
 
 use arbit_core::adapters::world_from_scenekit;
@@ -82,13 +87,28 @@ mod tests {
         let handle = arbit_capture_context_new();
         assert!(!handle.is_null());
 
+        let width = 8u32;
+        let height = 8u32;
+        let bytes_per_row = (width as usize) * 4;
+        let pixels = vec![0u8; bytes_per_row * (height as usize)];
+
         let frame = ArbitCameraFrame {
             timestamp_seconds: 0.0,
-            intrinsics: ArbitCameraIntrinsics::default(),
+            intrinsics: ArbitCameraIntrinsics {
+                fx: 500.0,
+                fy: 500.0,
+                cx: (width as f64) / 2.0,
+                cy: (height as f64) / 2.0,
+                skew: 0.0,
+                width,
+                height,
+                distortion_len: 0,
+                distortion: ptr::null(),
+            },
             pixel_format: ArbitPixelFormat::Bgra8,
-            bytes_per_row: 0,
-            data: ptr::null(),
-            data_len: 0,
+            bytes_per_row,
+            data: pixels.as_ptr(),
+            data_len: pixels.len(),
         };
 
         let mut sample = ArbitCameraSample {
