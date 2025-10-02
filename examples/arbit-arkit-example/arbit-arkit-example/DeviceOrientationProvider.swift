@@ -20,6 +20,9 @@ final class DeviceOrientationProvider: ObservableObject {
         queue.qualityOfService = .userInteractive
         return queue
     }()
+    private var lastTimestamp: TimeInterval?
+
+    var onAccelerometer: ((Double, Double, Double, Double) -> Void)?
 
     func start() {
         guard motionManager.isDeviceMotionAvailable else {
@@ -28,17 +31,31 @@ final class DeviceOrientationProvider: ObservableObject {
 
         motionManager.deviceMotionUpdateInterval = 1.0 / 60.0
         motionManager.startDeviceMotionUpdates(using: .xArbitraryCorrectedZVertical, to: queue) { [weak self] motion, _ in
-            guard let motion else { return }
+            guard let self, let motion else { return }
+
+            let timestamp = motion.timestamp
+            let dt: Double
+            if let last = self.lastTimestamp {
+                dt = max(timestamp - last, 1.0 / 240.0)
+            } else {
+                dt = 1.0 / 60.0
+            }
+            self.lastTimestamp = timestamp
+
+            let gravity = motion.gravity
+            self.onAccelerometer?(gravity.x * 9.80665, gravity.y * 9.80665, gravity.z * 9.80665, dt)
+
             let q = motion.attitude.quaternion
             let referenceToDevice = simd_quatf(ix: Float(q.x), iy: Float(q.y), iz: Float(q.z), r: Float(q.w))
             let deviceToReference = simd_normalize(referenceToDevice).inverse
             DispatchQueue.main.async {
-                self?.deviceToWorld = deviceToReference
+                self.deviceToWorld = deviceToReference
             }
         }
     }
 
     func stop() {
         motionManager.stopDeviceMotionUpdates()
+        lastTimestamp = nil
     }
 }

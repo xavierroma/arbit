@@ -7,7 +7,7 @@ This sample app implements the original ARKit-based prototype using plain AVFoun
 The SwiftUI app is split across lightweight components so the capture path mirrors the Rust core contracts:
 
 - **CameraCaptureManager** (`CapturePipeline.swift`) owns `AVCaptureSession` setup and feeds frames into `arbit-swift-lib`. It extracts per-frame intrinsics, wraps buffers as `CameraFrame`, and emits processed `CameraSample` structs surfaced to SwiftUI.
-- **arbit-swift-lib** (`examples/arbit-swift-lib/`) exposes the Rust FFI (`arbit_ffi`) as a Swift Package, providing safe wrappers such as `ArbitCaptureContext`, `CameraFrame`, and `CameraSample` with monotonic timestamp handling in Rust.
+- **arbit-swift-lib** (`crates/arbit-swift/swift-package/`) exposes the Rust FFI (`arbit_ffi`) as a Swift Package, providing safe wrappers such as `ArbitCaptureContext`, `CameraFrame`, and `CameraSample` with monotonic timestamp handling in Rust.
 - **DeviceOrientationProvider** (`DeviceOrientationProvider.swift`) streams CoreMotion quaternions using the `xArbitraryCorrectedZVertical` reference frame so the demo has a gravity-aligned world basis without ARKit.
 - **AxesSceneView** (`AxesSceneView.swift`) hosts a SceneKit scene that renders XYZ cylinders and applies the device-to-world quaternion from CoreMotion.
 - **CameraPreviewView** (`CameraPreviewView.swift`) bridges `AVCaptureVideoPreviewLayer` into SwiftUI.
@@ -32,7 +32,7 @@ CoreMotion ─▶ DeviceOrientationProvider ────────────
 ## Running the Demo
 
 1. Open `examples/arbit-arkit-example/arbit-arkit-example.xcodeproj` in Xcode 16 or later.
-2. Ensure the `arbit-arkit-example` target links the local Swift package `arbit-swift-lib` located at `examples/arbit-swift-lib` (already configured in the project).
+2. Ensure the `arbit-arkit-example` target links the local Swift package `arbit-swift-lib` located at `crates/arbit-swift/swift-package` (already configured in the project).
 3. Select an iOS device (simulator cannot provide camera frames) and run. Grant camera access on first launch.
 4. Observe:
    - Live BGRA preview from AVFoundation.

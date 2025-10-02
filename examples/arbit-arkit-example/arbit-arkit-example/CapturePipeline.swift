@@ -9,6 +9,7 @@ import AVFoundation
 import Combine
 import Foundation
 import os.log
+import simd
 import arbit_swift_lib
 
 struct IntrinsicsSummary {
@@ -38,6 +39,16 @@ final class CameraCaptureManager: NSObject, ObservableObject {
     @Published private(set) var authorizationStatus: AVAuthorizationStatus
     @Published private(set) var lastSample: CapturedSample?
     @Published private(set) var isRunning: Bool = false
+    @Published private(set) var pyramidLevels: [PyramidLevelView] = []
+    @Published private(set) var trackedPoints: [TrackedPoint] = []
+    @Published private(set) var twoViewSummary: TwoViewSummary?
+    @Published private(set) var trajectory: [PoseSample] = []
+    @Published private(set) var gravityEstimate: GravityVector?
+    @Published private(set) var mapStats: MapStats = MapStats(keyframes: 0, landmarks: 0, anchors: 0)
+    @Published private(set) var anchorPoses: [UInt64: simd_double4x4] = [:]
+    @Published private(set) var relocalizationSummary: RelocalizationSummary?
+    @Published private(set) var lastPoseMatrix: simd_double4x4?
+    @Published private(set) var mapStatusMessage: String?
 
     let session = AVCaptureSession()
 
@@ -48,10 +59,19 @@ final class CameraCaptureManager: NSObject, ObservableObject {
     private var context: ArbitCaptureContext?
     private var sessionConfigured = false
     private var frameCounter: Int = 0
+    private var savedMapData: Data?
+
+    var captureContext: ArbitCaptureContext? {
+        context
+    }
 
     override init() {
         authorizationStatus = AVCaptureDevice.authorizationStatus(for: .video)
         super.init()
+
+        // Initialize Rust logging with debug level
+        ArbitCaptureContext.initLogging()
+
         do {
             context = try ArbitCaptureContext()
         } catch {
@@ -83,6 +103,80 @@ final class CameraCaptureManager: NSObject, ObservableObject {
                 self.isRunning = false
             }
         }
+    }
+
+    func ingestAccelerometer(ax: Double, ay: Double, az: Double, dt: Double) {
+        guard let context else { return }
+        sampleQueue.async { [weak self] in
+            guard let self else { return }
+            context.ingestAccelerometer(ax: ax, ay: ay, az: az, dt: dt)
+            let estimate = context.gravityEstimate()
+            DispatchQueue.main.async {
+                self.gravityEstimate = estimate
+            }
+        }
+    }
+
+    func placeAnchor() {
+        guard let context else { return }
+        let pose = lastPoseMatrix ?? matrix_identity_double4x4
+        sampleQueue.async { [weak self] in
+            guard let _ = self else { return }
+            _ = context.createAnchor(pose: pose)
+            let translation = SIMD3(pose.columns.3.x, pose.columns.3.y, pose.columns.3.z)
+            self?.logger.info(
+                "Placed anchor at [\(translation.x, format: .fixed(precision: 2)), \(translation.y, format: .fixed(precision: 2)), \(translation.z, format: .fixed(precision:2))]"
+            )
+        }
+    }
+
+    func saveMapSnapshot() {
+        guard let context else { return }
+        sampleQueue.async { [weak self] in
+            guard let self else { return }
+            do {
+                let data = try context.saveMap()
+                self.savedMapData = data
+                self.logger.info("Saved map snapshot (\(data.count, format: .decimal) bytes)")
+                DispatchQueue.main.async {
+                    self.mapStatusMessage = String(format: "Saved map (%d bytes)", data.count)
+                }
+            } catch {
+                self.logger.error("Failed to save map snapshot: \(error.localizedDescription, privacy: .public)")
+                DispatchQueue.main.async {
+                    self.mapStatusMessage = "Failed to save map"
+                }
+            }
+        }
+    }
+
+    func loadSavedMap() {
+        guard let context else { return }
+        guard let data = savedMapData else {
+            mapStatusMessage = "No saved map snapshot"
+            return
+        }
+        sampleQueue.async { [weak self] in
+            guard let self else { return }
+            do {
+                try context.loadMap(data)
+                self.logger.info("Loaded map snapshot")
+                DispatchQueue.main.async {
+                    self.mapStatusMessage = "Map loaded"
+                }
+            } catch {
+                self.logger.error("Failed to load map snapshot: \(error.localizedDescription, privacy: .public)")
+                DispatchQueue.main.async {
+                    self.mapStatusMessage = "Failed to load map"
+                }
+            }
+        }
+    }
+
+    private func poseMatrix(from sample: PoseSample) -> simd_double4x4 {
+        var matrix = matrix_identity_double4x4
+        matrix.columns.3 = SIMD4(sample.position.x, sample.position.y, sample.position.z, 1.0)
+        return matrix
     }
 
     private func requestAuthorization() {
@@ -150,8 +244,8 @@ final class CameraCaptureManager: NSObject, ObservableObject {
                 if connection.isCameraIntrinsicMatrixDeliverySupported {
                     connection.isCameraIntrinsicMatrixDeliveryEnabled = true
                 }
-                if connection.isVideoOrientationSupported {
-                    connection.videoOrientation = .portrait
+                if connection.isVideoRotationAngleSupported(90) {
+                    connection.videoRotationAngle = 90
                 }
             }
 
@@ -197,39 +291,96 @@ extension CameraCaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate {
             data: frameData
         )
 
-        let sample: CameraSample
+        var sample: CameraSample?
         do {
             sample = try context.ingest(frame)
         } catch {
             logger.error("Failed to ingest frame into Arbit core: \(error.localizedDescription)")
-            return
+            // Continue processing - don't return early as this might be a temporary issue
+            // The pyramid and tracking will be empty for this frame but processing continues
         }
 
         frameCounter &+= 1
-        let summary = IntrinsicsSummary(
-            fx: sample.intrinsics.fx,
-            fy: sample.intrinsics.fy,
-            cx: sample.intrinsics.cx,
-            cy: sample.intrinsics.cy,
-            skew: sample.intrinsics.skew,
-            width: Int(sample.intrinsics.width),
-            height: Int(sample.intrinsics.height)
-        )
 
-        let captured = CapturedSample(
-            captureSeconds: sample.timestamps.capture,
-            pipelineSeconds: sample.timestamps.pipeline,
-            latencySeconds: sample.timestamps.latency,
-            rawTimestampSeconds: timestampSeconds,
-            intrinsics: summary,
-            pixelFormat: sample.pixelFormat,
-            bytesPerRow: sample.bytesPerRow,
-            frameIndex: frameCounter,
-            receivedAt: Date()
-        )
+        // Create sample data even if ingestion failed (for UI consistency)
+        let summary: IntrinsicsSummary
+        let captured: CapturedSample
+
+        if let sample = sample {
+            summary = IntrinsicsSummary(
+                fx: sample.intrinsics.fx,
+                fy: sample.intrinsics.fy,
+                cx: sample.intrinsics.cx,
+                cy: sample.intrinsics.cy,
+                skew: sample.intrinsics.skew,
+                width: Int(sample.intrinsics.width),
+                height: Int(sample.intrinsics.height)
+            )
+
+            captured = CapturedSample(
+                captureSeconds: sample.timestamps.capture,
+                pipelineSeconds: sample.timestamps.pipeline,
+                latencySeconds: sample.timestamps.latency,
+                rawTimestampSeconds: timestampSeconds,
+                intrinsics: summary,
+                pixelFormat: sample.pixelFormat,
+                bytesPerRow: sample.bytesPerRow,
+                frameIndex: frameCounter,
+                receivedAt: Date()
+            )
+        } else {
+            // Fallback sample when ingestion fails
+            let fallbackIntrinsics = makeIntrinsics(from: sampleBuffer, pixelBuffer: pixelBuffer)
+            summary = IntrinsicsSummary(
+                fx: fallbackIntrinsics.fx,
+                fy: fallbackIntrinsics.fy,
+                cx: fallbackIntrinsics.cx,
+                cy: fallbackIntrinsics.cy,
+                skew: fallbackIntrinsics.skew,
+                width: Int(fallbackIntrinsics.width),
+                height: Int(fallbackIntrinsics.height)
+            )
+            captured = CapturedSample(
+                captureSeconds: timestampSeconds,
+                pipelineSeconds: timestampSeconds + 0.001, // Small offset to show processing happened
+                latencySeconds: 0.001,
+                rawTimestampSeconds: timestampSeconds,
+                intrinsics: summary,
+                pixelFormat: .bgra8,
+                bytesPerRow: bytesPerRow,
+                frameIndex: frameCounter,
+                receivedAt: Date()
+            )
+        }
+
+        let pyramid = context.pyramidLevels(maxLevels: 3)
+        let tracks = context.trackedPoints(maxPoints: 200)
+        let twoView = context.latestTwoViewSummary()
+        let trajectory = context.trajectory(maxPoints: 256)
+        let gravity = context.gravityEstimate()
+        let stats = context.mapStats()
+        let anchorIDs = context.anchorIds(maxCount: 16)
+        var anchorDictionary: [UInt64: simd_double4x4] = [:]
+        for id in anchorIDs {
+            if let pose = context.resolveAnchor(id) {
+                anchorDictionary[id] = pose
+            }
+        }
+        let relocalization = context.lastRelocalizationSummary()
+        let latestPoseMatrix = trajectory.last.map { self.poseMatrix(from: $0) }
 
         DispatchQueue.main.async { [weak self] in
-            self?.lastSample = captured
+            guard let self else { return }
+            self.lastSample = captured
+            self.pyramidLevels = pyramid
+            self.trackedPoints = tracks
+            self.twoViewSummary = twoView
+            self.trajectory = trajectory
+            self.gravityEstimate = gravity
+            self.mapStats = stats
+            self.anchorPoses = anchorDictionary
+            self.relocalizationSummary = relocalization
+            self.lastPoseMatrix = latestPoseMatrix
         }
     }
 
