@@ -8,18 +8,20 @@ use arbit_core::math::se3::TransformSE3;
 use arbit_core::time::FrameTimestamps;
 use arbit_core::track::TrackOutcome;
 use arbit_engine::ProcessingEngine;
-use arbit_providers::{ArKitFrame, ArKitIntrinsics, CameraSample, PixelFormat};
+use arbit_providers::{ArKitFrame, ArKitIntrinsics, CameraSample, IosCameraProvider, PixelFormat};
 use log::{info, warn};
 use nalgebra::{Matrix4, Translation3, UnitQuaternion, Vector3};
 
 struct CaptureContext {
     engine: ProcessingEngine,
+    provider: IosCameraProvider,
 }
 
 impl Default for CaptureContext {
     fn default() -> Self {
         Self {
             engine: ProcessingEngine::new(),
+            provider: IosCameraProvider::new(),
         }
     }
 }
@@ -292,9 +294,11 @@ pub unsafe extern "C" fn arbit_ingest_camera_frame(
         return false;
     };
 
-    let Some(sample) = context.engine.ingest_camera_frame(&arkit_frame) else {
-        return false;
-    };
+    // Use IosCameraProvider to convert ArKitFrame → CameraSample
+    let sample = context.provider.ingest_frame(arkit_frame);
+
+    // Pass the generic CameraSample to the engine
+    context.engine.ingest_camera_sample(&sample);
 
     unsafe {
         *out_sample = ArbitCameraSample::from_sample(&sample);

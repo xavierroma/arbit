@@ -12,12 +12,12 @@ use arbit_core::map::{
 use arbit_core::math::se3::TransformSE3;
 use arbit_core::math::CameraIntrinsics;
 use arbit_core::relocalize::{PnPObservation, PnPRansac, PnPRansacParams, PnPResult};
-use arbit_core::time::{FrameTimestamps, SystemClock, TimestampPolicy};
+use arbit_core::time::FrameTimestamps;
 use arbit_core::track::{
     FeatureGridConfig, FeatureSeeder, LucasKanadeConfig, TrackObservation, TrackOutcome, Tracker,
 };
 use arbit_core::vo::{FrameObservation, VoLoop, VoLoopConfig, VoStatus};
-use arbit_providers::{ArKitFrame, CameraSample};
+use arbit_providers::CameraSample;
 use log::{debug, info, warn};
 use nalgebra::{Translation3, UnitQuaternion, Vector2, Vector3};
 
@@ -63,7 +63,6 @@ pub struct PyramidLevelCache {
 /// Processing engine that encapsulates the full camera/IMU pipeline.
 pub struct ProcessingEngine {
     config: EngineConfig,
-    timestamp_policy: TimestampPolicy<SystemClock>,
     last_intrinsics: Option<CameraIntrinsics>,
     prev_pyramid: Option<Pyramid>,
     pyramid_cache: Vec<PyramidLevelCache>,
@@ -100,7 +99,6 @@ impl ProcessingEngine {
 
         Self {
             config,
-            timestamp_policy: TimestampPolicy::new(),
             last_intrinsics: None,
             prev_pyramid: None,
             pyramid_cache: Vec::new(),
@@ -122,32 +120,23 @@ impl ProcessingEngine {
         }
     }
 
-    /// Ingest a camera frame, updating the internal state. Returns a camera sample with
-    /// monotonic timestamps when successful; returns `None` if the frame could not be processed.
-    pub fn ingest_camera_frame(&mut self, frame: &ArKitFrame) -> Option<CameraSample> {
-        let timestamps = self.timestamp_policy.ingest_capture(frame.timestamp);
-        let intrinsics = CameraIntrinsics::from(frame.intrinsics.clone());
+    /// Ingest a camera sample, updating the internal state.
+    pub fn ingest_camera_sample(&mut self, sample: &CameraSample) {
+        let intrinsics = sample.intrinsics.clone();
         let prev_intrinsics = self.last_intrinsics.clone();
+        let timestamp_seconds = sample.timestamps.capture.as_duration().as_secs_f64();
 
-        let sample = CameraSample {
-            timestamps,
-            intrinsics: intrinsics.clone(),
-            pixel_format: frame.pixel_format,
-            bytes_per_row: frame.bytes_per_row,
-            data: frame.data.clone(),
-        };
-
-        if let Some(image) = self.extract_image_buffer(frame, &intrinsics) {
+        if let Some(image) = self.extract_image_buffer(sample, &intrinsics) {
             self.process_image_buffer(
                 image,
                 &intrinsics,
                 prev_intrinsics.as_ref(),
-                frame.timestamp.as_secs_f64(),
+                timestamp_seconds,
             );
         } else {
             warn!(
                 "Failed to extract image buffer for frame at {:.3}s",
-                frame.timestamp.as_secs_f64()
+                timestamp_seconds
             );
             self.pyramid_cache.clear();
             self.last_tracks.clear();
@@ -159,11 +148,9 @@ impl ProcessingEngine {
             intrinsics.height,
             DescriptorSample::Refined,
         );
-        self.handle_vo_update(frame.timestamp.as_secs_f64(), &descriptor_current);
+        self.handle_vo_update(timestamp_seconds, &descriptor_current);
 
         self.last_intrinsics = Some(intrinsics);
-
-        Some(sample)
     }
 
     /// Ingest an accelerometer sample.
@@ -258,7 +245,7 @@ impl ProcessingEngine {
 
     fn extract_image_buffer(
         &self,
-        frame: &ArKitFrame,
+        sample: &CameraSample,
         intrinsics: &CameraIntrinsics,
     ) -> Option<ImageBuffer> {
         let width = intrinsics.width as usize;
@@ -268,15 +255,15 @@ impl ProcessingEngine {
         }
 
         let min_required = width.saturating_mul(height).saturating_mul(4);
-        if frame.data.len() < min_required {
+        if sample.data.len() < min_required {
             return None;
         }
 
         Some(ImageBuffer::from_bgra8(
-            frame.data.as_ref(),
+            sample.data.as_ref(),
             width,
             height,
-            frame.bytes_per_row,
+            sample.bytes_per_row,
         ))
     }
 
@@ -646,11 +633,13 @@ pub fn timestamps_to_seconds(timestamps: &FrameTimestamps) -> (f64, f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arbit_providers::{ArKitIntrinsics, PixelFormat};
+    use arbit_providers::{ArKitFrame, ArKitIntrinsics, IosCameraProvider, PixelFormat};
     use std::sync::Arc;
     use std::time::Duration;
 
-    fn frame() -> ArKitFrame {
+    fn sample_camera_sample() -> CameraSample {
+        // Use IosCameraProvider to properly create a CameraSample with valid timestamps
+        let mut provider = IosCameraProvider::new();
         let intrinsics = ArKitIntrinsics {
             fx: 800.0,
             fy: 800.0,
@@ -661,21 +650,25 @@ mod tests {
             height: 480,
             distortion: None,
         };
-        let bytes_per_row = (intrinsics.width as usize) * 4;
-        let buffer = vec![0u8; (intrinsics.height as usize) * bytes_per_row];
-        ArKitFrame {
+        let bytes_per_row = 640 * 4;
+        let buffer = vec![0u8; 480 * bytes_per_row];
+
+        let frame = ArKitFrame {
             timestamp: Duration::from_millis(0),
             intrinsics,
             pixel_format: PixelFormat::Bgra8,
             bytes_per_row,
             data: Arc::from(buffer),
-        }
+        };
+
+        provider.ingest_frame(frame)
     }
 
     #[test]
-    fn engine_ingests_frame() {
+    fn engine_ingests_sample() {
         let mut engine = ProcessingEngine::new();
-        let sample = engine.ingest_camera_frame(&frame()).expect("sample");
+        let sample = sample_camera_sample();
+        engine.ingest_camera_sample(&sample);
         assert_eq!(sample.intrinsics.width, 640);
         assert!(!engine.pyramid_levels().is_empty());
         assert!(engine.trajectory().len() >= 1);
