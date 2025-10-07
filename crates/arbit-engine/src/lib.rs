@@ -122,17 +122,26 @@ impl ProcessingEngine {
 
     /// Ingest a camera sample, updating the internal state.
     pub fn ingest_camera_sample(&mut self, sample: &CameraSample) {
+        use std::time::Instant;
+
         let intrinsics = sample.intrinsics.clone();
         let prev_intrinsics = self.last_intrinsics.clone();
         let timestamp_seconds = sample.timestamps.capture.as_duration().as_secs_f64();
 
+        let extract_start = Instant::now();
         if let Some(image) = self.extract_image_buffer(sample, &intrinsics) {
+            let extract_elapsed = extract_start.elapsed().as_secs_f64() * 1000.0;
+            debug!("    Image extraction: {:.2}ms", extract_elapsed);
+
+            let process_start = Instant::now();
             self.process_image_buffer(
                 image,
                 &intrinsics,
                 prev_intrinsics.as_ref(),
                 timestamp_seconds,
             );
+            let process_elapsed = process_start.elapsed().as_secs_f64() * 1000.0;
+            debug!("    Image processing: {:.2}ms", process_elapsed);
         } else {
             warn!(
                 "Failed to extract image buffer for frame at {:.3}s",
@@ -142,13 +151,20 @@ impl ProcessingEngine {
             self.last_tracks.clear();
         }
 
+        let descriptor_start = Instant::now();
         let descriptor_current = build_descriptor(
             &self.last_tracks,
             intrinsics.width,
             intrinsics.height,
             DescriptorSample::Refined,
         );
+        let descriptor_elapsed = descriptor_start.elapsed().as_secs_f64() * 1000.0;
+        debug!("    Descriptor build: {:.2}ms", descriptor_elapsed);
+
+        let vo_start = Instant::now();
         self.handle_vo_update(timestamp_seconds, &descriptor_current);
+        let vo_elapsed = vo_start.elapsed().as_secs_f64() * 1000.0;
+        debug!("    VO update: {:.2}ms", vo_elapsed);
 
         self.last_intrinsics = Some(intrinsics);
     }
@@ -206,6 +222,11 @@ impl ProcessingEngine {
             self.map.landmark_count() as u64,
             self.map.anchor_count() as u64,
         )
+    }
+
+    /// Current estimated camera pose.
+    pub fn current_pose(&self) -> &TransformSE3 {
+        &self.current_pose
     }
 
     /// Snapshot of anchor identifiers currently tracked.
@@ -274,16 +295,24 @@ impl ProcessingEngine {
         prev_intrinsics: Option<&CameraIntrinsics>,
         timestamp_seconds: f64,
     ) {
+        use std::time::Instant;
+
         debug!(
             "Successfully extracted image buffer: {}x{}",
             image.width(),
             image.height()
         );
 
+        let pyramid_start = Instant::now();
         let pyramid = build_pyramid(&image, 3);
         let levels = pyramid.levels().len();
-        debug!("Built pyramid with {} levels", levels);
+        let pyramid_elapsed = pyramid_start.elapsed().as_secs_f64() * 1000.0;
+        debug!(
+            "      Pyramid build: {:.2}ms ({} levels)",
+            pyramid_elapsed, levels
+        );
 
+        let cache_start = Instant::now();
         self.pyramid_cache = pyramid
             .levels()
             .iter()
@@ -296,23 +325,34 @@ impl ProcessingEngine {
                 pixels: self.encode_luma(level),
             })
             .collect();
+        let cache_elapsed = cache_start.elapsed().as_secs_f64() * 1000.0;
+        debug!("      Pyramid cache: {:.2}ms", cache_elapsed);
 
         if let Some(prev_pyramid) = &self.prev_pyramid {
+            let seed_start = Instant::now();
             let seeds = self.seeder.seed(&prev_pyramid.levels()[0]);
-            debug!("Seeded {} features for tracking", seeds.len());
+            let seed_elapsed = seed_start.elapsed().as_secs_f64() * 1000.0;
+            debug!(
+                "      Feature seeding: {:.2}ms ({} seeds)",
+                seed_elapsed,
+                seeds.len()
+            );
 
+            let track_start = Instant::now();
             let mut tracks = Vec::with_capacity(seeds.len());
             for seed in seeds.iter().take(256) {
                 let observation = self.tracker.track(prev_pyramid, &pyramid, seed.position);
                 tracks.push(observation);
             }
+            let track_elapsed = track_start.elapsed().as_secs_f64() * 1000.0;
 
             let converged_tracks = tracks
                 .iter()
                 .filter(|t| matches!(t.outcome, TrackOutcome::Converged))
                 .count();
             debug!(
-                "Computed {} tracks, {} converged",
+                "      Feature tracking: {:.2}ms ({} tracks, {} converged)",
+                track_elapsed,
                 tracks.len(),
                 converged_tracks
             );
@@ -320,31 +360,38 @@ impl ProcessingEngine {
             self.last_tracks = tracks;
 
             if let Some(prev_intr) = prev_intrinsics {
+                let descriptor_start = Instant::now();
                 let descriptor_prev = build_descriptor(
                     &self.last_tracks,
                     prev_intr.width,
                     prev_intr.height,
                     DescriptorSample::Initial,
                 );
+                let descriptor_elapsed = descriptor_start.elapsed().as_secs_f64() * 1000.0;
+                debug!("      Descriptor build (prev): {:.2}ms", descriptor_elapsed);
+
+                let match_start = Instant::now();
                 let matches_indexed =
                     build_feature_matches(&self.last_tracks, prev_intr, intrinsics);
                 let matches: Vec<FeatureMatch> = matches_indexed
                     .iter()
                     .map(|(_, feature)| *feature)
                     .collect();
+                let match_elapsed = match_start.elapsed().as_secs_f64() * 1000.0;
 
                 debug!(
-                    "Found {} feature matches for two-view initialization",
+                    "      Feature matching: {:.2}ms ({} matches)",
+                    match_elapsed,
                     matches.len()
                 );
 
                 if matches.len() >= 8 {
-                    debug!(
-                        "Attempting two-view initialization with {} matches",
-                        matches.len()
-                    );
-
+                    let two_view_start = Instant::now();
                     if let Some(two_view) = self.two_view_initializer.estimate(&matches) {
+                        let two_view_elapsed = two_view_start.elapsed().as_secs_f64() * 1000.0;
+                        debug!("      Two-view init: {:.2}ms (SUCCESS)", two_view_elapsed);
+
+                        let keyframe_start = Instant::now();
                         let prev_pose = self.current_pose.clone();
                         let scaled_two_view = two_view.scaled(self.config.baseline_scale);
                         self.try_insert_keyframe(
@@ -353,6 +400,8 @@ impl ProcessingEngine {
                             &scaled_two_view,
                             &matches_indexed,
                         );
+                        let keyframe_elapsed = keyframe_start.elapsed().as_secs_f64() * 1000.0;
+                        debug!("      Keyframe insertion: {:.2}ms", keyframe_elapsed);
 
                         self.current_pose = update_pose(&self.current_pose, &scaled_two_view);
                         self.trajectory.push(self.current_pose.translation.vector);
@@ -361,13 +410,10 @@ impl ProcessingEngine {
                             self.trajectory.drain(0..trim);
                         }
                         self.last_two_view = Some(scaled_two_view);
-                        debug!(
-                            "Two-view initialization successful, trajectory length: {}",
-                            self.trajectory.len()
-                        );
                     } else {
+                        let two_view_elapsed = two_view_start.elapsed().as_secs_f64() * 1000.0;
+                        debug!("      Two-view init: {:.2}ms (FAILED)", two_view_elapsed);
                         self.last_two_view = None;
-                        debug!("Two-view initialization failed");
                     }
                 } else {
                     self.last_two_view = None;
