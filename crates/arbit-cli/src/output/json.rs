@@ -1,3 +1,4 @@
+use arbit_engine::types::{EngineSnapshot, TrajectoryPoint};
 use serde::{Deserialize, Serialize};
 
 /// Complete processing output in JSON format
@@ -5,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub struct ProcessingOutput {
     pub metadata: Metadata,
     pub trajectory: Vec<TrajectoryPoint>,
+    pub snapshots: Vec<EngineSnapshot>,
     pub frame_stats: Vec<FrameStat>,
     pub imu_stats: Option<ImuStats>,
     pub summary: Summary,
@@ -21,18 +23,7 @@ pub struct Metadata {
     pub duration_seconds: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TrajectoryPoint {
-    pub timestamp: f64,
-    pub x: f64,
-    pub y: f64,
-    pub z: f64,
-    pub qw: f64,
-    pub qx: f64,
-    pub qy: f64,
-    pub qz: f64,
-}
-
+/// Per-frame statistics (CLI-specific, includes processing time)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FrameStat {
     pub frame: usize,
@@ -43,10 +34,11 @@ pub struct FrameStat {
     pub gravity_x: Option<f64>,
     pub gravity_y: Option<f64>,
     pub gravity_z: Option<f64>,
-    pub imu_rotation_prior: Option<f64>, // rotation angle from IMU preintegration
+    pub imu_rotation_prior: Option<f64>,
     pub motion_state: Option<String>,
 }
 
+/// IMU statistics summary (CLI-specific, aggregated over session)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImuStats {
     pub total_samples: usize,

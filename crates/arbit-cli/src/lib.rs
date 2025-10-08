@@ -6,6 +6,7 @@ pub mod types;
 pub mod video;
 
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use arbit_engine::ProcessingEngine;
@@ -20,7 +21,7 @@ use crate::video::VideoDecoder;
 
 /// Video processor that runs the ARBIT engine on recorded sessions
 pub struct VideoProcessor {
-    engine: ProcessingEngine,
+    engine: Arc<RwLock<ProcessingEngine>>,
     provider: VideoCameraProvider,
     config: ProcessingConfig,
 }
@@ -28,10 +29,15 @@ pub struct VideoProcessor {
 impl VideoProcessor {
     pub fn new(config: ProcessingConfig) -> Self {
         Self {
-            engine: ProcessingEngine::new(),
+            engine: Arc::new(RwLock::new(ProcessingEngine::new())),
             provider: VideoCameraProvider::new(),
             config,
         }
+    }
+
+    /// Get a reference to the shared engine (useful for debug server)
+    pub fn engine(&self) -> Arc<RwLock<ProcessingEngine>> {
+        Arc::clone(&self.engine)
     }
 
     /// Process a video session (with optional IMU data)
@@ -112,7 +118,7 @@ impl VideoProcessor {
                     }
 
                     // Ingest IMU sample (both accelerometer and gyroscope)
-                    self.engine.ingest_imu_sample(
+                    self.engine.write().unwrap().ingest_imu_sample(
                         imu_sample.timestamp_secs(),
                         imu_sample.gyro(),
                         imu_sample.accel(),
@@ -140,38 +146,48 @@ impl VideoProcessor {
 
             // Process frame through engine
             let engine_start = Instant::now();
-            self.engine.ingest_camera_sample(&camera_sample);
+            {
+                let mut engine = self.engine.write().unwrap();
+                engine.ingest_camera_sample(&camera_sample);
+            }
             let engine_elapsed = engine_start.elapsed().as_secs_f64() * 1000.0;
             info!("  Engine processing: {:.2}ms", engine_elapsed);
 
             let processing_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
 
-            // Collect statistics
+            // Collect statistics and snapshot
             let stats_start = Instant::now();
-            let tracks = self.engine.tracked_points().len();
-            let inliers = self
-                .engine
-                .tracked_points()
-                .iter()
-                .filter(|t| matches!(t.outcome, arbit_core::track::TrackOutcome::Converged))
-                .count();
+            let (tracks, inliers, gravity_x, gravity_y, gravity_z, snapshot) = {
+                let mut engine = self.engine.write().unwrap();
 
-            let (gravity_x, gravity_y, gravity_z) =
-                if let Some(gravity) = self.engine.gravity_estimate() {
-                    let down = gravity.down().into_inner();
-                    (Some(down.x), Some(down.y), Some(down.z))
-                } else {
-                    (None, None, None)
-                };
+                let tracks = engine.tracked_points().len();
+                let inliers = engine
+                    .tracked_points()
+                    .iter()
+                    .filter(|t| matches!(t.outcome, arbit_core::track::TrackOutcome::Converged))
+                    .count();
 
-            analysis.add_pose(self.engine.current_pose().clone());
+                let (gravity_x, gravity_y, gravity_z) =
+                    if let Some(gravity) = engine.gravity_estimate() {
+                        let down = gravity.down().into_inner();
+                        (Some(down.x), Some(down.y), Some(down.z))
+                    } else {
+                        (None, None, None)
+                    };
 
-            // Finish IMU preintegration for this frame (IMU samples already fed before camera frame)
-            if self.engine.has_preintegration() {
-                self.engine.finish_imu_preintegration();
-                analysis.increment_preintegration_count();
-            }
+                // Create snapshot of engine state
+                let snapshot = engine.snapshot(timestamp);
 
+                // Finish IMU preintegration for this frame (IMU samples already fed before camera frame)
+                if engine.has_preintegration() {
+                    engine.finish_imu_preintegration();
+                    analysis.increment_preintegration_count();
+                }
+
+                (tracks, inliers, gravity_x, gravity_y, gravity_z, snapshot)
+            };
+
+            // Create frame stat (before moving snapshot)
             analysis.add_frame_stat(FrameStat {
                 frame: frame_idx,
                 timestamp,
@@ -181,9 +197,12 @@ impl VideoProcessor {
                 gravity_x,
                 gravity_y,
                 gravity_z,
-                imu_rotation_prior: self.engine.last_imu_rotation_prior(),
-                motion_state: self.engine.last_motion_state(),
+                imu_rotation_prior: snapshot.imu.rotation_prior_rad,
+                motion_state: snapshot.imu.motion_state.clone(),
             });
+
+            // Add snapshot to analysis
+            analysis.add_snapshot(snapshot);
             let stats_elapsed = stats_start.elapsed().as_secs_f64() * 1000.0;
             debug!("  Statistics collection: {:.2}ms", stats_elapsed);
 
@@ -201,8 +220,12 @@ impl VideoProcessor {
         }
 
         // Get final statistics from engine
-        let trajectory = self.engine.trajectory().to_vec();
-        let (keyframes, landmarks, _anchors) = self.engine.map_stats();
+        let (trajectory, keyframes, landmarks) = {
+            let engine = self.engine.read().unwrap();
+            let trajectory = engine.trajectory().to_vec();
+            let (keyframes, landmarks, _anchors) = engine.map_stats();
+            (trajectory, keyframes, landmarks)
+        };
 
         info!(
             "Processing complete: {} frames, {} keyframes, {} landmarks",
@@ -216,7 +239,7 @@ impl VideoProcessor {
 
     /// Save the current map to a file
     pub fn save_map<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let bytes = self.engine.save_map()?;
+        let bytes = self.engine.read().unwrap().save_map()?;
         std::fs::write(path, bytes)?;
         Ok(())
     }
@@ -224,7 +247,7 @@ impl VideoProcessor {
     /// Load a map from a file
     pub fn load_map<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
         let bytes = std::fs::read(path)?;
-        self.engine.load_map(&bytes)?;
+        self.engine.write().unwrap().load_map(&bytes)?;
         Ok(())
     }
 }

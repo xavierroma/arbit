@@ -1,3 +1,5 @@
+pub mod types;
+
 use std::collections::{HashMap, HashSet};
 
 use arbit_core::img::{build_pyramid, ImageBuffer, Pyramid, PyramidLevel};
@@ -279,6 +281,16 @@ impl ProcessingEngine {
     /// Returns the preintegration count (number of intervals completed).
     pub fn preintegration_count(&self) -> usize {
         self.preintegration_count
+    }
+
+    /// Returns the current frame index.
+    pub fn frame_index(&self) -> u64 {
+        self.frame_index
+    }
+
+    /// Create a snapshot of the current engine state.
+    pub fn snapshot(&self, timestamp: f64) -> types::EngineSnapshot {
+        types::EngineSnapshot::from_engine(self, timestamp, self.frame_index)
     }
 
     /// Ingest a camera sample, updating the internal state.

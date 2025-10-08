@@ -1,15 +1,15 @@
-use crate::output::{FrameStat, ImuStats, Metadata, ProcessingOutput, Summary, TrajectoryPoint};
+use crate::output::{FrameStat, ImuStats, Metadata, ProcessingOutput, Summary};
 use crate::types::{ImuSample, SessionData};
-use arbit_core::math::se3::TransformSE3;
+use arbit_engine::types::{EngineSnapshot, TrajectoryPoint};
 
 /// Collects statistics during processing
 pub struct AnalysisCollector {
     session: SessionData,
+    snapshots: Vec<EngineSnapshot>,
     frame_stats: Vec<FrameStat>,
     processing_times: Vec<f64>,
     imu_samples: Vec<ImuSample>,
     imu_gravity_count: usize,
-    poses: Vec<TransformSE3>,
     preintegration_count: usize,
 }
 
@@ -17,13 +17,18 @@ impl AnalysisCollector {
     pub fn new(session: SessionData) -> Self {
         Self {
             session,
+            snapshots: Vec::new(),
             frame_stats: Vec::new(),
             processing_times: Vec::new(),
             imu_samples: Vec::new(),
             imu_gravity_count: 0,
-            poses: Vec::new(),
             preintegration_count: 0,
         }
+    }
+
+    /// Add an engine snapshot for this frame
+    pub fn add_snapshot(&mut self, snapshot: EngineSnapshot) {
+        self.snapshots.push(snapshot);
     }
 
     /// Increments the preintegration interval counter.
@@ -45,10 +50,6 @@ impl AnalysisCollector {
         self.imu_gravity_count += 1;
     }
 
-    pub fn add_pose(&mut self, pose: TransformSE3) {
-        self.poses.push(pose);
-    }
-
     pub fn finalize(
         self,
         _trajectory: Vec<nalgebra::Vector3<f64>>,
@@ -58,11 +59,11 @@ impl AnalysisCollector {
     ) -> ProcessingOutput {
         let AnalysisCollector {
             session,
+            snapshots,
             frame_stats,
             processing_times,
             imu_samples,
             imu_gravity_count,
-            poses,
             preintegration_count,
         } = self;
 
@@ -75,26 +76,18 @@ impl AnalysisCollector {
         let frame_count = frame_stats.len();
         let imu_sample_count = imu_samples.len();
 
-        let trajectory_points: Vec<TrajectoryPoint> = poses
+        // Build trajectory from snapshots
+        let trajectory_points: Vec<TrajectoryPoint> = snapshots
             .iter()
-            .enumerate()
-            .map(|(i, pose)| {
-                let timestamp = if !frame_stats.is_empty() && i < frame_stats.len() {
-                    frame_stats[i].timestamp
-                } else {
-                    0.0
-                };
-                let quat = pose.rotation.quaternion();
-                TrajectoryPoint {
-                    timestamp,
-                    x: pose.translation.x,
-                    y: pose.translation.y,
-                    z: pose.translation.z,
-                    qw: quat.w,
-                    qx: quat.i,
-                    qy: quat.j,
-                    qz: quat.k,
-                }
+            .map(|snapshot| TrajectoryPoint {
+                timestamp: snapshot.timestamp,
+                x: snapshot.pose.translation[0],
+                y: snapshot.pose.translation[1],
+                z: snapshot.pose.translation[2],
+                qw: snapshot.pose.rotation_quaternion[3],
+                qx: snapshot.pose.rotation_quaternion[0],
+                qy: snapshot.pose.rotation_quaternion[1],
+                qz: snapshot.pose.rotation_quaternion[2],
             })
             .collect();
 
@@ -210,6 +203,7 @@ impl AnalysisCollector {
                 duration_seconds: duration,
             },
             trajectory: trajectory_points,
+            snapshots,
             frame_stats,
             imu_stats,
             summary: Summary {

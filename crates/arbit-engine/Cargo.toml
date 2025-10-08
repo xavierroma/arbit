@@ -9,3 +9,4 @@ arbit-providers = { path = "../arbit-providers" }
 log = "0.4"
 thiserror = "1.0"
 nalgebra = "0.34.1"
+serde = { version = "1.0", features = ["derive"] }
