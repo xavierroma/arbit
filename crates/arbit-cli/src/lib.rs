@@ -111,15 +111,12 @@ impl VideoProcessor {
                         break;
                     }
 
-                    let (ax, ay, az) = imu_sample.accel();
-                    let dt = if imu_index > 0 {
-                        (imu_sample.timestamp_secs() - samples[imu_index - 1].timestamp_secs())
-                            .max(0.001)
-                    } else {
-                        1.0 / 100.0 // Assume 100Hz
-                    };
-
-                    self.engine.ingest_accelerometer(ax, ay, az, dt);
+                    // Ingest IMU sample (both accelerometer and gyroscope)
+                    self.engine.ingest_imu_sample(
+                        imu_sample.timestamp_secs(),
+                        imu_sample.gyro(),
+                        imu_sample.accel(),
+                    );
                     analysis.increment_gravity_count();
                     imu_index += 1;
                     imu_count += 1;
@@ -169,6 +166,12 @@ impl VideoProcessor {
 
             analysis.add_pose(self.engine.current_pose().clone());
 
+            // Finish IMU preintegration for this frame (IMU samples already fed before camera frame)
+            if self.engine.has_preintegration() {
+                self.engine.finish_imu_preintegration();
+                analysis.increment_preintegration_count();
+            }
+
             analysis.add_frame_stat(FrameStat {
                 frame: frame_idx,
                 timestamp,
@@ -178,6 +181,8 @@ impl VideoProcessor {
                 gravity_x,
                 gravity_y,
                 gravity_z,
+                imu_rotation_prior: self.engine.last_imu_rotation_prior(),
+                motion_state: self.engine.last_motion_state(),
             });
             let stats_elapsed = stats_start.elapsed().as_secs_f64() * 1000.0;
             debug!("  Statistics collection: {:.2}ms", stats_elapsed);

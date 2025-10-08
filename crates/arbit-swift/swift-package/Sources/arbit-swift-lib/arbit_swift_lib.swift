@@ -10,6 +10,62 @@ import simd
 import ARKit
 #endif
 
+// MARK: - Public IMU Types
+
+/// IMU sample containing 6DOF sensor data (accelerometer + gyroscope)
+public struct ImuSample {
+    public let timestampSeconds: Double
+    public let accelX: Double
+    public let accelY: Double
+    public let accelZ: Double
+    public let gyroX: Double
+    public let gyroY: Double
+    public let gyroZ: Double
+    
+    public init(
+        timestampSeconds: Double,
+        accelX: Double, accelY: Double, accelZ: Double,
+        gyroX: Double, gyroY: Double, gyroZ: Double
+    ) {
+        self.timestampSeconds = timestampSeconds
+        self.accelX = accelX
+        self.accelY = accelY
+        self.accelZ = accelZ
+        self.gyroX = gyroX
+        self.gyroY = gyroY
+        self.gyroZ = gyroZ
+    }
+    
+    /// Convert to FFI representation
+    fileprivate func toFFI() -> ArbitFFI.ArbitImuSample {
+        ArbitFFI.ArbitImuSample(
+            timestamp_seconds: timestampSeconds,
+            accel_x: accelX,
+            accel_y: accelY,
+            accel_z: accelZ,
+            gyro_x: gyroX,
+            gyro_y: gyroY,
+            gyro_z: gyroZ
+        )
+    }
+}
+
+/// Motion state classification
+public enum MotionState: String {
+    case stationary = "Stationary"
+    case slowMotion = "SlowMotion"
+    case fastMotion = "FastMotion"
+    
+    fileprivate init?(ffiState: ArbitFFI.ArbitMotionState) {
+        switch ffiState.state {
+        case 0: self = .stationary
+        case 1: self = .slowMotion
+        case 2: self = .fastMotion
+        default: return nil
+        }
+    }
+}
+
 @_silgen_name("arbit_capture_context_new")
 private func ffi_capture_context_new() -> OpaquePointer?
 
@@ -57,6 +113,29 @@ private func ffi_capture_context_trajectory(
 private func ffi_ingest_accelerometer_sample(
     _ handle: OpaquePointer?,
     _ sample: ArbitAccelerometerSample
+) -> Bool
+
+@_silgen_name("arbit_ingest_imu_sample")
+private func ffi_ingest_imu_sample(
+    _ handle: OpaquePointer?,
+    _ sample: ArbitImuSample
+) -> Bool
+
+@_silgen_name("arbit_finish_imu_preintegration")
+private func ffi_finish_imu_preintegration(
+    _ handle: OpaquePointer?
+) -> Bool
+
+@_silgen_name("arbit_last_imu_rotation_prior")
+private func ffi_last_imu_rotation_prior(
+    _ handle: OpaquePointer?,
+    _ rotation: UnsafeMutablePointer<Double>?
+) -> Bool
+
+@_silgen_name("arbit_last_motion_state")
+private func ffi_last_motion_state(
+    _ handle: OpaquePointer?,
+    _ state: UnsafeMutablePointer<ArbitMotionState>?
 ) -> Bool
 
 @_silgen_name("arbit_capture_context_gravity")
@@ -538,6 +617,41 @@ public final class ArbitCaptureContext: @unchecked Sendable {
         }
 
         return sample
+    }
+
+    /// Ingest a full 6DOF IMU sample (accelerometer + gyroscope)
+    /// This is the preferred method for feeding IMU data as it enables preintegration
+    public func ingestIMUSample(_ sample: ImuSample) throws {
+        guard ffi_ingest_imu_sample(handle, sample.toFFI()) else {
+            throw ArbitCaptureError.ingestionFailed
+        }
+    }
+    
+    /// Finish the current IMU preintegration interval
+    /// 
+    /// **DEPRECATED**: This is now called automatically when you ingest a camera frame,
+    /// so you no longer need to call this manually. It remains for backwards compatibility.
+    @available(*, deprecated, message: "IMU preintegration is now finished automatically when ingesting camera frames")
+    public func finishIMUPreintegration() {
+        _ = ffi_finish_imu_preintegration(handle)
+    }
+    
+    /// Get the last IMU rotation prior (in radians)
+    public func lastIMURotationPrior() -> Double? {
+        var rotation: Double = 0
+        if ffi_last_imu_rotation_prior(handle, &rotation) {
+            return rotation
+        }
+        return nil
+    }
+    
+    /// Get the last motion state
+    public func lastMotionState() -> MotionState? {
+        var ffiState = ArbitFFI.ArbitMotionState(state: 0)
+        if ffi_last_motion_state(handle, &ffiState) {
+            return MotionState(ffiState: ffiState)
+        }
+        return nil
     }
 
     /// Validates that a frame can be processed before ingestion

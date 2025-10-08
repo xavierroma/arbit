@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use arbit_core::img::{build_pyramid, ImageBuffer, Pyramid, PyramidLevel};
-use arbit_core::imu::{GravityEstimate, GravityEstimator};
+use arbit_core::imu::{
+    AccelBiasEstimator, GravityEstimate, GravityEstimator, GyroBiasEstimator, ImuPreintegrator,
+    MotionDetector, MotionState, MotionStats, PreintegratedImu, PreintegrationConfig,
+};
 use arbit_core::init::two_view::{
     FeatureMatch, RansacParams, TwoViewInitialization, TwoViewInitializer,
 };
@@ -81,6 +84,14 @@ pub struct ProcessingEngine {
     frame_index: u64,
     last_relocalization: Option<PnPResult>,
     last_keyframe_id: Option<u64>,
+    // IMU preintegration components
+    preintegrator: Option<ImuPreintegrator>,
+    motion_detector: Option<MotionDetector>,
+    gyro_bias_estimator: Option<GyroBiasEstimator>,
+    accel_bias_estimator: Option<AccelBiasEstimator>,
+    last_motion_stats: Option<MotionStats>,
+    last_preintegrated: Option<PreintegratedImu>,
+    preintegration_count: usize,
 }
 
 impl ProcessingEngine {
@@ -97,7 +108,7 @@ impl ProcessingEngine {
             min_inliers: config.relocalization_min_inliers,
         });
 
-        Self {
+        let mut engine = Self {
             config,
             last_intrinsics: None,
             prev_pyramid: None,
@@ -117,12 +128,166 @@ impl ProcessingEngine {
             frame_index: 0,
             last_relocalization: None,
             last_keyframe_id: None,
+            preintegrator: None,
+            motion_detector: None,
+            gyro_bias_estimator: None,
+            accel_bias_estimator: None,
+            last_motion_stats: None,
+            last_preintegrated: None,
+            preintegration_count: 0,
+        };
+
+        // Enable IMU preintegration by default
+        engine.enable_imu_preintegration(PreintegrationConfig::default());
+
+        engine
+    }
+
+    /// Enables IMU preintegration for improved 6DOF estimation.
+    /// Call this to activate gyroscope + accelerometer fusion.
+    pub fn enable_imu_preintegration(&mut self, config: PreintegrationConfig) {
+        info!("Enabling IMU preintegration with config: {:?}", config);
+        self.preintegrator = Some(ImuPreintegrator::new(
+            config,
+            Vector3::zeros(), // Initial gyro bias
+            Vector3::zeros(), // Initial accel bias
+        ));
+        self.motion_detector = Some(MotionDetector::new(200)); // 1 second window at 200 Hz
+        self.gyro_bias_estimator = Some(GyroBiasEstimator::new(2000)); // 10 seconds at 200 Hz
+        self.accel_bias_estimator = Some(AccelBiasEstimator::new(2000, 9.80665));
+    }
+
+    /// Disables IMU preintegration (e.g., for visual-only mode).
+    pub fn disable_imu_preintegration(&mut self) {
+        info!("Disabling IMU preintegration");
+        self.preintegrator = None;
+        self.motion_detector = None;
+        self.gyro_bias_estimator = None;
+        self.accel_bias_estimator = None;
+        self.last_motion_stats = None;
+        self.last_preintegrated = None;
+    }
+
+    /// Returns whether IMU preintegration is currently enabled.
+    pub fn has_preintegration(&self) -> bool {
+        self.preintegrator.is_some()
+    }
+
+    /// Ingests an IMU sample (gyroscope + accelerometer) for preintegration.
+    /// Call this for each IMU sample between camera frames.
+    ///
+    /// * `timestamp` - Timestamp in seconds
+    /// * `gyro` - Gyroscope reading in rad/s (x, y, z)
+    /// * `accel` - Accelerometer reading in m/s² (x, y, z)
+    pub fn ingest_imu_sample(
+        &mut self,
+        timestamp: f64,
+        gyro: (f64, f64, f64),
+        accel: (f64, f64, f64),
+    ) {
+        let gyro_vec = Vector3::new(gyro.0, gyro.1, gyro.2);
+        let accel_vec = Vector3::new(accel.0, accel.1, accel.2);
+
+        // Update gravity estimator (uses accelerometer only)
+        let dt = 0.005; // Assume 200 Hz IMU rate
+        if let Some(gravity_est) = self.gravity_estimator.update(accel_vec, dt) {
+            self.last_gravity = Some(gravity_est.clone());
+
+            // Update motion detector if enabled
+            if let Some(ref mut detector) = self.motion_detector {
+                if let Some(ref gravity) = self.last_gravity {
+                    detector.set_gravity(gravity.as_vector(9.80665));
+                }
+                let motion_stats = detector.update(gyro_vec, accel_vec);
+                self.last_motion_stats = Some(motion_stats);
+
+                // Update bias estimators during stationary periods
+                if motion_stats.state == MotionState::Stationary {
+                    if let Some(ref mut gyro_bias_est) = self.gyro_bias_estimator {
+                        gyro_bias_est.update(gyro_vec);
+                    }
+                    if let Some(ref mut accel_bias_est) = self.accel_bias_estimator {
+                        accel_bias_est.update(accel_vec);
+                    }
+                }
+            }
+
+            // Integrate IMU if preintegrator is enabled
+            if let Some(ref mut preint) = self.preintegrator {
+                let timestamp_duration = std::time::Duration::from_secs_f64(timestamp);
+                let gravity_vec = gravity_est.as_vector(9.80665);
+                preint.integrate(timestamp_duration, gyro_vec, accel_vec, gravity_vec);
+            }
         }
+    }
+
+    /// Finishes the current IMU preintegration interval and returns the result.
+    /// Returns the preintegrated IMU measurements if preintegration is enabled.
+    pub fn finish_imu_preintegration(&mut self) -> Option<PreintegratedImu> {
+        if let Some(ref mut preint) = self.preintegrator {
+            // Update bias estimates if available
+            if let Some(ref gyro_bias_est) = self.gyro_bias_estimator {
+                if gyro_bias_est.is_valid() {
+                    let gyro_bias = gyro_bias_est.bias();
+                    let accel_bias = self
+                        .accel_bias_estimator
+                        .as_ref()
+                        .and_then(|est| {
+                            if est.is_valid() {
+                                Some(est.bias())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_else(Vector3::zeros);
+                    preint.set_biases(gyro_bias, accel_bias);
+                }
+            }
+
+            let result = preint.finish();
+            self.last_preintegrated = Some(result.clone());
+            self.preintegration_count += 1;
+
+            debug!(
+                "IMU preintegration #{}: {} samples over {:.3}s, rotation={:.3}°",
+                self.preintegration_count,
+                result.sample_count,
+                result.delta_time.as_secs_f64(),
+                result.delta_rotation.log().norm().to_degrees()
+            );
+
+            Some(result)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the last IMU rotation prior (in radians) if available.
+    pub fn last_imu_rotation_prior(&self) -> Option<f64> {
+        self.last_preintegrated
+            .as_ref()
+            .map(|p| p.delta_rotation.log().norm())
+    }
+
+    /// Returns the last motion state as a string if available.
+    pub fn last_motion_state(&self) -> Option<String> {
+        self.last_motion_stats
+            .as_ref()
+            .map(|s| format!("{:?}", s.state))
+    }
+
+    /// Returns the preintegration count (number of intervals completed).
+    pub fn preintegration_count(&self) -> usize {
+        self.preintegration_count
     }
 
     /// Ingest a camera sample, updating the internal state.
     pub fn ingest_camera_sample(&mut self, sample: &CameraSample) {
         use std::time::Instant;
+
+        // Finish IMU preintegration for the interval leading up to this frame.
+        // This provides rotation/velocity/position priors for feature tracking.
+        let _preintegrated = self.finish_imu_preintegration();
 
         let intrinsics = sample.intrinsics.clone();
         let prev_intrinsics = self.last_intrinsics.clone();
@@ -341,7 +506,14 @@ impl ProcessingEngine {
             let track_start = Instant::now();
             let mut tracks = Vec::with_capacity(seeds.len());
             for seed in seeds.iter().take(256) {
-                let observation = self.tracker.track(prev_pyramid, &pyramid, seed.position);
+                // Use IMU rotation prior if available to improve tracking
+                let rotation_prior = self.last_preintegrated.as_ref().map(|p| &p.delta_rotation);
+                let observation = self.tracker.track_with_prior(
+                    prev_pyramid,
+                    &pyramid,
+                    seed.position,
+                    rotation_prior,
+                );
                 tracks.push(observation);
             }
             let track_elapsed = track_start.elapsed().as_secs_f64() * 1000.0;

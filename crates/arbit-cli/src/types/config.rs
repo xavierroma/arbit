@@ -17,6 +17,9 @@ pub struct ProcessingConfig {
     pub max_frames: Option<usize>,
     /// Intrinsics source configuration
     pub intrinsics: IntrinsicsConfig,
+    /// IMU configuration
+    #[serde(default)]
+    pub imu: ImuConfig,
     /// Output directory
     #[serde(default = "default_output_dir")]
     pub output_dir: PathBuf,
@@ -31,6 +34,70 @@ fn default_frame_rate() -> f64 {
 
 fn default_output_dir() -> PathBuf {
     PathBuf::from("./arbit-output")
+}
+
+/// Configuration for IMU processing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImuConfig {
+    /// Enable IMU preintegration for improved 6DOF estimates
+    #[serde(default = "default_true")]
+    pub enable_preintegration: bool,
+    /// Gyroscope measurement noise density (rad/s/√Hz)
+    #[serde(default = "default_gyro_noise")]
+    pub gyro_noise_density: f64,
+    /// Accelerometer measurement noise density (m/s²/√Hz)
+    #[serde(default = "default_accel_noise")]
+    pub accel_noise_density: f64,
+    /// Gyroscope bias random walk (rad/s²/√Hz)
+    #[serde(default = "default_gyro_bias_walk")]
+    pub gyro_bias_random_walk: f64,
+    /// Accelerometer bias random walk (m/s³/√Hz)
+    #[serde(default = "default_accel_bias_walk")]
+    pub accel_bias_random_walk: f64,
+    /// Gravity time constant for estimation (seconds)
+    #[serde(default = "default_gravity_time_const")]
+    pub gravity_time_constant: f64,
+    /// Enable motion-aware scale monitoring
+    #[serde(default = "default_true")]
+    pub motion_aware_scale: bool,
+}
+
+impl Default for ImuConfig {
+    fn default() -> Self {
+        Self {
+            enable_preintegration: true,
+            gyro_noise_density: default_gyro_noise(),
+            accel_noise_density: default_accel_noise(),
+            gyro_bias_random_walk: default_gyro_bias_walk(),
+            accel_bias_random_walk: default_accel_bias_walk(),
+            gravity_time_constant: default_gravity_time_const(),
+            motion_aware_scale: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_gyro_noise() -> f64 {
+    1.7e-4 // rad/s/√Hz - typical for consumer IMUs
+}
+
+fn default_accel_noise() -> f64 {
+    2.0e-3 // m/s²/√Hz
+}
+
+fn default_gyro_bias_walk() -> f64 {
+    1.9e-5 // rad/s²/√Hz
+}
+
+fn default_accel_bias_walk() -> f64 {
+    3.0e-3 // m/s³/√Hz
+}
+
+fn default_gravity_time_const() -> f64 {
+    1.0 // seconds - balances responsiveness and smoothness
 }
 
 /// Configuration for camera intrinsics

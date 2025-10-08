@@ -7,6 +7,7 @@
 
 import AVFoundation
 import Combine
+import CoreMotion
 import Foundation
 import os.log
 import simd
@@ -60,6 +61,8 @@ final class CameraCaptureManager: NSObject, ObservableObject {
     private var sessionConfigured = false
     private var frameCounter: Int = 0
     private var savedMapData: Data?
+    private let motionManager = CMMotionManager()
+    private let motionQueue = OperationQueue()
 
     var captureContext: ArbitCaptureContext? {
         context
@@ -84,6 +87,7 @@ final class CameraCaptureManager: NSObject, ObservableObject {
         switch authorizationStatus {
         case .authorized:
             configureAndStartSession()
+            startIMUUpdates()
         case .notDetermined:
             requestAuthorization()
         case .denied, .restricted:
@@ -99,6 +103,7 @@ final class CameraCaptureManager: NSObject, ObservableObject {
             if self.session.isRunning {
                 self.session.stopRunning()
             }
+            self.stopIMUUpdates()
             DispatchQueue.main.async {
                 self.isRunning = false
             }
@@ -258,6 +263,78 @@ final class CameraCaptureManager: NSObject, ObservableObject {
         session.commitConfiguration()
         sessionConfigured = true
     }
+    
+    // MARK: - IMU Management
+    
+    private func startIMUUpdates() {
+        guard motionManager.isDeviceMotionAvailable else {
+            logger.warning("Device motion (IMU) not available")
+            return
+        }
+        
+        // Set update interval to 500 Hz (2ms)
+        motionManager.deviceMotionUpdateInterval = 1.0 / 500.0
+        
+        // Start device motion updates (includes both accel and gyro)
+        motionManager.startDeviceMotionUpdates(to: motionQueue) { [weak self] motion, error in
+            guard let self = self, let motion = motion, error == nil else {
+                if let error = error {
+                    self?.logger.error("IMU update error: \(error.localizedDescription)")
+                }
+                return
+            }
+            
+            self.ingestIMUSample(motion)
+        }
+        
+        logger.info("Started IMU updates at 500 Hz")
+    }
+    
+    private func stopIMUUpdates() {
+        if motionManager.isDeviceMotionActive {
+            motionManager.stopDeviceMotionUpdates()
+            logger.info("Stopped IMU updates")
+        }
+    }
+    
+    private func ingestIMUSample(_ motion: CMDeviceMotion) {
+        guard let context = context else { return }
+        
+        // Use userAcceleration (linear accel, gravity already removed by iOS)
+        // Note: For iOS, CoreMotion already did high-quality gravity estimation,
+        // so we use the pre-processed data instead of reconstructing raw samples.
+        // The Rust engine will use iOS's gravity estimate instead of computing its own.
+        let userAccel = motion.userAcceleration
+        
+        // Convert from g to m/s²
+        let accel = (
+            x: userAccel.x * 9.80665,
+            y: userAccel.y * 9.80665,
+            z: userAccel.z * 9.80665
+        )
+        
+        // Get gyroscope data (rotation rate in rad/s)
+        let gyro = motion.rotationRate
+        
+        // Create IMU sample
+        let sample = ImuSample(
+            timestampSeconds: motion.timestamp,
+            accelX: accel.x,
+            accelY: accel.y,
+            accelZ: accel.z,
+            gyroX: gyro.x,
+            gyroY: gyro.y,
+            gyroZ: gyro.z
+        )
+        
+        // Feed to Rust engine (non-blocking)
+        do {
+            try context.ingestIMUSample(sample)
+        } catch {
+            // Log but don't spam - IMU samples arrive at 500 Hz
+            logger.debug("Failed to ingest IMU sample: \(error.localizedDescription)")
+        }
+    }
 }
 
 extension CameraCaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate {
@@ -293,6 +370,7 @@ extension CameraCaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate {
 
         var sample: CameraSample?
         do {
+            // Ingest the camera frame (IMU preintegration is finished automatically)
             sample = try context.ingest(frame)
         } catch {
             logger.error("Failed to ingest frame into Arbit core: \(error.localizedDescription)")

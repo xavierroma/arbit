@@ -11,17 +11,19 @@
 
 pub use arbit_ffi::{
     ArbitAccelerometerSample, ArbitCameraFrame, ArbitCameraIntrinsics, ArbitCameraSample,
-    ArbitCaptureContextHandle, ArbitFrameTimestamps, ArbitGravityEstimate, ArbitPixelFormat,
-    ArbitPoseSample, ArbitPyramidLevelView, ArbitRelocalizationSummary, ArbitTrackStatus,
-    ArbitTrackedPoint, ArbitTransform, ArbitTwoViewSummary, arbit_capture_context_create_anchor,
-    arbit_capture_context_free, arbit_capture_context_gravity,
-    arbit_capture_context_last_relocalization, arbit_capture_context_list_anchors,
-    arbit_capture_context_load_map, arbit_capture_context_map_stats, arbit_capture_context_new,
+    ArbitCaptureContextHandle, ArbitFrameTimestamps, ArbitGravityEstimate, ArbitImuSample,
+    ArbitMotionState, ArbitPixelFormat, ArbitPoseSample, ArbitPyramidLevelView,
+    ArbitRelocalizationSummary, ArbitTrackStatus, ArbitTrackedPoint, ArbitTransform,
+    ArbitTwoViewSummary, arbit_capture_context_create_anchor, arbit_capture_context_free,
+    arbit_capture_context_gravity, arbit_capture_context_last_relocalization,
+    arbit_capture_context_list_anchors, arbit_capture_context_load_map,
+    arbit_capture_context_map_stats, arbit_capture_context_new,
     arbit_capture_context_pyramid_levels, arbit_capture_context_resolve_anchor,
     arbit_capture_context_save_map, arbit_capture_context_tracked_points,
     arbit_capture_context_trajectory, arbit_capture_context_two_view,
-    arbit_capture_context_update_anchor, arbit_ingest_accelerometer_sample,
-    arbit_ingest_camera_frame,
+    arbit_capture_context_update_anchor, arbit_finish_imu_preintegration,
+    arbit_ingest_accelerometer_sample, arbit_ingest_camera_frame, arbit_ingest_imu_sample,
+    arbit_last_imu_rotation_prior, arbit_last_motion_state,
 };
 
 use arbit_core::adapters::world_from_scenekit;

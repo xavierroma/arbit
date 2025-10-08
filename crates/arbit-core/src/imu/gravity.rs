@@ -18,6 +18,22 @@ impl GravityEstimate {
     pub fn up(&self) -> UnitVector3<f64> {
         UnitVector3::new_unchecked(-self.gravity_dir.into_inner())
     }
+
+    /// Returns the gravity vector with a given magnitude (typically 9.80665 m/s²).
+    pub fn as_vector(&self, magnitude: f64) -> Vector3<f64> {
+        self.gravity_dir.into_inner() * magnitude
+    }
+
+    /// Removes the gravity component from an accelerometer reading to obtain
+    /// pure linear acceleration. This is essential for IMU preintegration.
+    ///
+    /// * `accel` — raw accelerometer reading in m/s²
+    /// * `gravity_magnitude` — expected gravity magnitude (typically 9.80665 m/s²)
+    ///
+    /// Returns the linear acceleration component (motion-induced acceleration only).
+    pub fn remove_gravity(&self, accel: Vector3<f64>, gravity_magnitude: f64) -> Vector3<f64> {
+        accel - self.as_vector(gravity_magnitude)
+    }
 }
 
 /// Exponential moving-average gravity estimator that assumes IMU samples are provided
@@ -110,5 +126,29 @@ mod tests {
         assert!(angle <= std::f64::consts::PI / 90.0); // <=2°
         assert_relative_eq!(down.norm(), 1.0, epsilon = 1e-6);
         assert_relative_eq!(expected.norm(), 1.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn remove_gravity_works() {
+        let mut estimator = GravityEstimator::new(0.5);
+        let gravity = Vector3::new(0.0, 9.80665, 0.0);
+        let dt = 0.005;
+
+        // Converge to gravity estimate
+        for _ in 0..500 {
+            estimator.update(gravity, dt);
+        }
+
+        let estimate = estimator.update(gravity, dt).unwrap();
+
+        // Accelerometer reading: gravity + linear acceleration
+        let linear_accel = Vector3::new(1.0, 0.0, 0.5);
+        let accel_reading = gravity + linear_accel;
+
+        // Remove gravity should recover linear acceleration
+        let recovered = estimate.remove_gravity(accel_reading, 9.80665);
+        assert_relative_eq!(recovered.x, linear_accel.x, epsilon = 0.01);
+        assert_relative_eq!(recovered.y, linear_accel.y, epsilon = 0.01);
+        assert_relative_eq!(recovered.z, linear_accel.z, epsilon = 0.01);
     }
 }

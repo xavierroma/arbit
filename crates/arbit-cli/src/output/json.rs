@@ -43,13 +43,24 @@ pub struct FrameStat {
     pub gravity_x: Option<f64>,
     pub gravity_y: Option<f64>,
     pub gravity_z: Option<f64>,
+    pub imu_rotation_prior: Option<f64>, // rotation angle from IMU preintegration
+    pub motion_state: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImuStats {
-    pub accelerometer_samples: usize,
+    pub total_samples: usize,
+    pub has_gyroscope_data: bool,
     pub gravity_estimate_count: usize,
     pub average_gravity_magnitude: f64,
+    pub gyro_bias_x: f64,
+    pub gyro_bias_y: f64,
+    pub gyro_bias_z: f64,
+    pub accel_bias_x: f64,
+    pub accel_bias_y: f64,
+    pub accel_bias_z: f64,
+    pub preintegration_intervals: usize,
+    pub average_motion_state: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -212,6 +212,18 @@ pub struct ArbitAccelerometerSample {
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
+pub struct ArbitImuSample {
+    pub timestamp_seconds: f64,
+    pub accel_x: f64,
+    pub accel_y: f64,
+    pub accel_z: f64,
+    pub gyro_x: f64,
+    pub gyro_y: f64,
+    pub gyro_z: f64,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
 pub struct ArbitGravityEstimate {
     pub down: [f64; 3],
     pub samples: u32,
@@ -426,20 +438,90 @@ pub unsafe extern "C" fn arbit_capture_context_trajectory(
     count
 }
 
+/// Ingest a full 6DOF IMU sample (accelerometer + gyroscope).
+/// This is the preferred method for feeding IMU data as it enables IMU preintegration.
+///
+/// * `timestamp_seconds` - Timestamp in seconds
+/// * `accel_*` - Accelerometer reading in m/s² (x, y, z)
+/// * `gyro_*` - Gyroscope reading in rad/s (x, y, z)
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn arbit_ingest_accelerometer_sample(
+pub unsafe extern "C" fn arbit_ingest_imu_sample(
     handle: *mut ArbitCaptureContextHandle,
-    sample: ArbitAccelerometerSample,
+    sample: ArbitImuSample,
 ) -> bool {
     if handle.is_null() {
         return false;
     }
 
     let context = unsafe { &mut (*handle).inner };
-    context
-        .engine
-        .ingest_accelerometer(sample.ax, sample.ay, sample.az, sample.dt_seconds);
+    context.engine.ingest_imu_sample(
+        sample.timestamp_seconds,
+        (sample.gyro_x, sample.gyro_y, sample.gyro_z),
+        (sample.accel_x, sample.accel_y, sample.accel_z),
+    );
     true
+}
+
+/// Returns the last IMU rotation prior (in radians) if available.
+///
+/// * `out_rotation_radians` - Output pointer for rotation magnitude
+///
+/// Returns true if a rotation prior is available.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arbit_last_imu_rotation_prior(
+    handle: *mut ArbitCaptureContextHandle,
+    out_rotation_radians: *mut f64,
+) -> bool {
+    if handle.is_null() || out_rotation_radians.is_null() {
+        return false;
+    }
+
+    let context = unsafe { &mut (*handle).inner };
+    if let Some(rotation) = context.engine.last_imu_rotation_prior() {
+        unsafe {
+            *out_rotation_radians = rotation;
+        }
+        true
+    } else {
+        false
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct ArbitMotionState {
+    pub state: u32, // 0 = Stationary, 1 = SlowMotion, 2 = FastMotion
+}
+
+/// Returns the last motion state if available.
+///
+/// * `out_state` - Output pointer for motion state (0=Stationary, 1=Slow, 2=Fast)
+///
+/// Returns true if a motion state is available.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arbit_last_motion_state(
+    handle: *mut ArbitCaptureContextHandle,
+    out_state: *mut ArbitMotionState,
+) -> bool {
+    if handle.is_null() || out_state.is_null() {
+        return false;
+    }
+
+    let context = unsafe { &mut (*handle).inner };
+    if let Some(state_str) = context.engine.last_motion_state() {
+        let state_code = match state_str.as_str() {
+            "Stationary" => 0,
+            "SlowMotion" => 1,
+            "FastMotion" => 2,
+            _ => 0,
+        };
+        unsafe {
+            *out_state = ArbitMotionState { state: state_code };
+        }
+        true
+    } else {
+        false
+    }
 }
 
 #[unsafe(no_mangle)]

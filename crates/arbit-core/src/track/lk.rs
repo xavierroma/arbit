@@ -1,6 +1,39 @@
 use crate::img::pyramid::{Pyramid, PyramidLevel};
+use crate::math::SO3;
 use log::{debug, trace};
-use nalgebra::Vector2;
+use nalgebra::{Vector2, Vector3};
+
+/// Apply a rotation to a pixel position, assuming unit focal length.
+/// This is a simplified approximation for small rotations.
+fn apply_rotation_to_pixel(pixel: Vector2<f32>, rotation: &SO3) -> Vector2<f32> {
+    // For small rotations, we can approximate the effect on pixel coordinates
+    // by rotating a ray in normalized image coordinates
+    // This is a first-order approximation that works well for IMU-rate rotations
+
+    let rotation_angle = rotation.log().norm();
+    if rotation_angle < 1e-6 {
+        // Rotation is negligible
+        return pixel;
+    }
+
+    // Convert pixel to normalized coordinates (assuming unit focal length, adjust if needed)
+    // For a more accurate version, you'd need camera intrinsics here
+    let ray = Vector3::new(pixel.x as f64, pixel.y as f64, 1.0).normalize();
+
+    // Rotate the ray
+    let rotated_ray = rotation.unit_quaternion() * ray;
+
+    // Project back to pixel space
+    if rotated_ray.z.abs() < 1e-9 {
+        return pixel; // Avoid division by zero
+    }
+
+    let scale = 1.0 / rotated_ray.z;
+    Vector2::new(
+        (rotated_ray.x * scale) as f32,
+        (rotated_ray.y * scale) as f32,
+    )
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct LucasKanadeConfig {
@@ -44,19 +77,40 @@ impl Tracker {
         Self { config }
     }
 
+    /// Track a feature from prev to curr pyramid, optionally using an IMU rotation prior.
+    ///
+    /// * `rotation_prior` - Optional SO(3) rotation from IMU preintegration to improve initial guess
     pub fn track(
         &self,
         prev: &Pyramid,
         curr: &Pyramid,
         initial_position: Vector2<f32>,
     ) -> TrackObservation {
+        self.track_with_prior(prev, curr, initial_position, None)
+    }
+
+    /// Track with an optional rotation prior from IMU.
+    pub fn track_with_prior(
+        &self,
+        prev: &Pyramid,
+        curr: &Pyramid,
+        initial_position: Vector2<f32>,
+        rotation_prior: Option<&SO3>,
+    ) -> TrackObservation {
         trace!(
-            "Tracking feature from {:?} across {} pyramid levels",
+            "Tracking feature from {:?} across {} pyramid levels (rotation_prior: {})",
             initial_position,
-            prev.levels().len()
+            prev.levels().len(),
+            rotation_prior.is_some()
         );
 
-        let mut current_base = initial_position;
+        // Apply rotation prior to improve initial guess if available
+        let mut current_base = if let Some(rotation) = rotation_prior {
+            apply_rotation_to_pixel(initial_position, rotation)
+        } else {
+            initial_position
+        };
+
         let mut total_iterations = 0u32;
         let mut residual = 0.0f32;
 
