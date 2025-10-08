@@ -3,7 +3,7 @@ set -euo pipefail
 
 crate_root="$(cd -- "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 workspace_root="$(cd -- "${crate_root}/../.." && pwd)"
-headers_dir="${crate_root}/swift-package/include"
+c_module_dir="${crate_root}/swift-package/include"
 output_root="${1:-${crate_root}/swift-package}"    # default alongside packaged Swift sources
 artifact_name="ArbitFFI"
 config="release"
@@ -14,20 +14,23 @@ if ! command -v xcodebuild >/dev/null 2>&1; then
   exit 1
 fi
 
-if [[ ! -d "${headers_dir}" ]]; then
-  echo "error: expected header directory at ${headers_dir}" >&2
+if [[ ! -d "${c_module_dir}" ]]; then
+  mkdir -p "${c_module_dir}"
+fi
+
+# Generate the C header using arbit-ffi's generation script
+echo "Generating C header from arbit-ffi..."
+"${workspace_root}/crates/arbit-ffi/scripts/generate-header.sh"
+
+# Copy the generated header to the Swift package
+ffi_header="${workspace_root}/crates/arbit-ffi/include/arbit_ffi.h"
+if [[ ! -f "${ffi_header}" ]]; then
+  echo "error: C header not found at ${ffi_header}" >&2
   exit 1
 fi
 
-# if ! command -v cbindgen >/dev/null 2>&1; then
-#   echo "error: cbindgen must be installed (cargo install cbindgen)." >&2
-#   exit 1
-# fi
-
-# cbindgen "${crate_root}" \
-#   --config "${crate_root}/cbindgen.toml" \
-#   --crate "${crate_package}" \
-#   --output "${headers_dir}/arbit_swift.h"
+cp "${ffi_header}" "${c_module_dir}/arbit_swift.h"
+echo "Copied C header to ${c_module_dir}/arbit_swift.h"
 
 ensure_target() {
   local target="$1"
@@ -64,19 +67,20 @@ mkdir -p "${output_root}"
 framework_out="${output_root}/${artifact_name}.xcframework"
 rm -rf "${framework_out}"
 
+# Ensure we have a modulemap for Swift interop
+if [[ ! -f "${c_module_dir}/module.modulemap" ]]; then
+  echo "warning: module.modulemap not found in ${c_module_dir}, XCFramework may not import correctly" >&2
+fi
+
 create_args=("-create-xcframework")
 for entry in "${libraries[@]}"; do
   target="${entry%%::*}"
   lib_path="${entry##*::}"
-  create_args+=("-library" "${lib_path}" "-headers" "${headers_dir}")
+  create_args+=("-library" "${lib_path}" "-headers" "${c_module_dir}")
   echo "added ${target} -> ${lib_path}"
 done
 create_args+=("-output" "${framework_out}")
 
 xcodebuild "${create_args[@]}"
-
-# Copy headers next to the framework for convenience.
-mkdir -p "${output_root}/include"
-cp -f "${headers_dir}/"* "${output_root}/include/"
 
 echo "\nCreated ${framework_out}" 

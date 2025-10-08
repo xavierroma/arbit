@@ -4,23 +4,23 @@
 import PackageDescription
 
 let package = Package(
-    name: "arbit-swift-lib",
+    name: "Arbit",
     products: [
         // Products define the executables and libraries a package produces, making them visible to other packages.
         .library(
-            name: "arbit-swift-lib",
-            targets: ["arbit-swift-lib"]
+            name: "Arbit",
+            targets: ["Arbit"]
         ),
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
         // Targets can depend on other targets in this package and products from dependencies.
         .binaryTarget(
-              name: "ArbitFFI",
+            name: "ArbitFFI",
               path: "ArbitFFI.xcframework"
-            ),
+        ),
         .target(
-            name: "arbit-swift-lib",
+            name: "Arbit",
             dependencies: ["ArbitFFI"]
         ),
 

@@ -1,12 +1,10 @@
 language = "C"
-include_guard = "ARBIT_SWIFT_H"
-pragma_once = false
 sys_includes = []
 no_includes = true
 
 header = """
-#ifndef ARBIT_SWIFT_H
-#define ARBIT_SWIFT_H
+#ifndef ARBIT_FFI_H
+#define ARBIT_FFI_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -22,15 +20,14 @@ trailer = """
 }
 #endif
 
-#endif // ARBIT_SWIFT_H
+#endif // ARBIT_FFI_H
 """
 
 [parse]
-parse_deps = true
+parse_deps = false
 extra_bindings = []
 
 [export]
-include = ["arbit_swift"]
+# Export all public items, exclude internal types
+exclude = ["CaptureContext"]
 
-[style]
-fn_args = "Linear"

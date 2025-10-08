@@ -7,9 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		1D40577F2E8B54DE00AF2DFE /* arbit-swift-lib in Frameworks */ = {isa = PBXBuildFile; productRef = 1D40577E2E8B54DE00AF2DFE /* arbit-swift-lib */; };
+		1D2C36C42E96B371002064F6 /* Arbit in Frameworks */ = {isa = PBXBuildFile; productRef = 1D2C36C32E96B371002064F6 /* Arbit */; };
 		1D40579B2E8B675B00AF2DFE /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 1D40579A2E8B675B00AF2DFE /* README.md */; };
-		1D4057AE2E8EB2BF00AF2DFE /* arbit-swift-lib in Frameworks */ = {isa = PBXBuildFile; productRef = 1D4057AD2E8EB2BF00AF2DFE /* arbit-swift-lib */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -30,8 +29,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				1D40577F2E8B54DE00AF2DFE /* arbit-swift-lib in Frameworks */,
-				1D4057AE2E8EB2BF00AF2DFE /* arbit-swift-lib in Frameworks */,
+				1D2C36C42E96B371002064F6 /* Arbit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -75,8 +73,7 @@
 			);
 			name = "arbit-arkit-example";
 			packageProductDependencies = (
-				1D40577E2E8B54DE00AF2DFE /* arbit-swift-lib */,
-				1D4057AD2E8EB2BF00AF2DFE /* arbit-swift-lib */,
+				1D2C36C32E96B371002064F6 /* Arbit */,
 			);
 			productName = "arbit-arkit-example";
 			productReference = 1D40576D2E8B4EA800AF2DFE /* arbit-arkit-example.app */;
@@ -107,7 +104,7 @@
 			mainGroup = 1D4057642E8B4EA800AF2DFE;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				1D4057AC2E8EB2BF00AF2DFE /* XCLocalSwiftPackageReference "../../crates/arbit-swift/swift-package" */,
+				1D2C36C22E96B371002064F6 /* XCLocalSwiftPackageReference "../../crates/arbit-swift/swift-package" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 1D40576E2E8B4EA800AF2DFE /* Products */;
@@ -358,20 +355,16 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		1D4057AC2E8EB2BF00AF2DFE /* XCLocalSwiftPackageReference "../../crates/arbit-swift/swift-package" */ = {
+		1D2C36C22E96B371002064F6 /* XCLocalSwiftPackageReference "../../crates/arbit-swift/swift-package" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = "../../crates/arbit-swift/swift-package";
 		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		1D40577E2E8B54DE00AF2DFE /* arbit-swift-lib */ = {
+		1D2C36C32E96B371002064F6 /* Arbit */ = {
 			isa = XCSwiftPackageProductDependency;
-			productName = "arbit-swift-lib";
-		};
-		1D4057AD2E8EB2BF00AF2DFE /* arbit-swift-lib */ = {
-			isa = XCSwiftPackageProductDependency;
-			productName = "arbit-swift-lib";
+			productName = Arbit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

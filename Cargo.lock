@@ -147,9 +147,7 @@ dependencies = [
 name = "arbit-swift"
 version = "0.1.0"
 dependencies = [
- "arbit-core",
  "arbit-ffi",
- "nalgebra",
 ]
 
 [[package]]

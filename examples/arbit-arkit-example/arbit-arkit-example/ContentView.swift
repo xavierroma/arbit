@@ -11,7 +11,7 @@ import SceneKit
 import AVFoundation
 import CoreGraphics
 import simd
-import arbit_swift_lib
+import Arbit
 
 private enum Milestone: Int, CaseIterable, Identifiable {
     case m1 = 1, m2, m3, m4, m5, m6, m7, m8
@@ -123,7 +123,7 @@ struct ContentView: View {
         case .m3:
             MilestoneThreePanel(
                 orientation: orientationProvider.deviceToWorld,
-                gravity: cameraManager.gravityEstimate
+                gravityDown: cameraManager.imu?.gravityDown
             )
         case .m4:
             MilestoneFourPanel(trackedPoints: cameraManager.trackedPoints)
@@ -358,14 +358,14 @@ private struct PyramidLevelThumbnail: View {
 
 private struct MilestoneThreePanel: View {
     let orientation: simd_quatf
-    let gravity: GravityVector?
+    let gravityDown: SIMD3<Double>?
 
     private var deviceDown: simd_float3 {
-        if let gravity {
+        if let gravityDown {
             return simd_float3(
-                Float(gravity.down.x),
-                Float(gravity.down.y),
-                Float(gravity.down.z)
+                Float(gravityDown.x),
+                Float(gravityDown.y),
+                Float(gravityDown.z)
             )
         }
         return orientation.inverse.act(simd_float3(0, -1, 0))
@@ -410,8 +410,8 @@ private struct MilestoneThreePanel: View {
                 Text(String(format: "Roll: %.1f°", angles.roll * 180.0 / .pi))
                 Text(String(format: "Pitch: %.1f°", angles.pitch * 180.0 / .pi))
                 Text(String(format: "Yaw: %.1f°", angles.yaw * 180.0 / .pi))
-                if let gravity {
-                    Text("Samples: \(gravity.samples)")
+                if let gravityDown {
+                    Text("Samples: \(gravityDown.debugDescription)")
                 }
             }
             .font(.system(.footnote, design: .monospaced))

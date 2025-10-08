@@ -4,9 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-arbit-core = { path = "../arbit-core" }
 arbit-ffi = { path = "../arbit-ffi" }
-nalgebra = "0.34.1"
 
 [lib]
 name = "arbit_swift"

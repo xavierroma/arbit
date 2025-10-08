@@ -11,7 +11,7 @@ import CoreMotion
 import Foundation
 import os.log
 import simd
-import arbit_swift_lib
+import Arbit
 
 struct IntrinsicsSummary {
     let fx: Double
@@ -44,7 +44,7 @@ final class CameraCaptureManager: NSObject, ObservableObject {
     @Published private(set) var trackedPoints: [TrackedPoint] = []
     @Published private(set) var twoViewSummary: TwoViewSummary?
     @Published private(set) var trajectory: [PoseSample] = []
-    @Published private(set) var gravityEstimate: GravityVector?
+    @Published private(set) var imu: ImuState?
     @Published private(set) var mapStats: MapStats = MapStats(keyframes: 0, landmarks: 0, anchors: 0)
     @Published private(set) var anchorPoses: [UInt64: simd_double4x4] = [:]
     @Published private(set) var relocalizationSummary: RelocalizationSummary?
@@ -421,10 +421,10 @@ extension CameraCaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate {
 
         let pyramid = context.pyramidLevels(maxLevels: 3)
         let tracks = context.trackedPoints(maxPoints: 200)
-        let twoView = context.latestTwoViewSummary()
+        let frameState = context.getFrameState()
+        let imuState = context.getImuState()
+        let twoView = frameState?.twoView
         let trajectory = context.trajectory(maxPoints: 256)
-        let gravity = context.gravityEstimate()
-        let stats = context.mapStats()
         let anchorIDs = context.anchorIds(maxCount: 16)
         var anchorDictionary: [UInt64: simd_double4x4] = [:]
         for id in anchorIDs {
@@ -432,7 +432,7 @@ extension CameraCaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate {
                 anchorDictionary[id] = pose
             }
         }
-        let relocalization = context.lastRelocalizationSummary()
+        let relocalization = frameState?.relocalization
         let latestPoseMatrix = trajectory.last.map { self.poseMatrix(from: $0) }
 
         DispatchQueue.main.async { [weak self] in
@@ -442,8 +442,10 @@ extension CameraCaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate {
             self.trackedPoints = tracks
             self.twoViewSummary = twoView
             self.trajectory = trajectory
-            self.gravityEstimate = gravity
-            self.mapStats = stats
+            self.imu = imuState
+            self.mapStats = MapStats(keyframes: frameState?.keyframeCount ?? 0,
+                                     landmarks: frameState?.landmarkCount ?? 0,
+                                     anchors: frameState?.anchorCount ?? 0)
             self.anchorPoses = anchorDictionary
             self.relocalizationSummary = relocalization
             self.lastPoseMatrix = latestPoseMatrix
