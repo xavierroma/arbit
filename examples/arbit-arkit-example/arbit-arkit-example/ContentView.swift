@@ -91,9 +91,6 @@ struct ContentView: View {
         }
         .onAppear {
             cameraManager.start()
-            orientationProvider.onAccelerometer = { [weak cameraManager] ax, ay, az, dt in
-                cameraManager?.ingestAccelerometer(ax: ax, ay: ay, az: az, dt: dt)
-            }
             orientationProvider.start()
         }
         .onDisappear {

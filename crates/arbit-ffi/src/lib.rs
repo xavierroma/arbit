@@ -203,15 +203,6 @@ pub struct ArbitPoseSample {
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct ArbitAccelerometerSample {
-    pub ax: f64,
-    pub ay: f64,
-    pub az: f64,
-    pub dt_seconds: f64,
-}
-
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
 pub struct ArbitImuSample {
     pub timestamp_seconds: f64,
     pub accel_x: f64,

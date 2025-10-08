@@ -110,18 +110,6 @@ final class CameraCaptureManager: NSObject, ObservableObject {
         }
     }
 
-    func ingestAccelerometer(ax: Double, ay: Double, az: Double, dt: Double) {
-        guard let context else { return }
-        sampleQueue.async { [weak self] in
-            guard let self else { return }
-            context.ingestAccelerometer(ax: ax, ay: ay, az: az, dt: dt)
-            let estimate = context.gravityEstimate()
-            DispatchQueue.main.async {
-                self.gravityEstimate = estimate
-            }
-        }
-    }
-
     func placeAnchor() {
         guard let context else { return }
         let pose = lastPoseMatrix ?? matrix_identity_double4x4

@@ -109,21 +109,10 @@ private func ffi_capture_context_trajectory(
     _ maxPoints: Int
 ) -> Int
 
-@_silgen_name("arbit_ingest_accelerometer_sample")
-private func ffi_ingest_accelerometer_sample(
-    _ handle: OpaquePointer?,
-    _ sample: ArbitAccelerometerSample
-) -> Bool
-
 @_silgen_name("arbit_ingest_imu_sample")
 private func ffi_ingest_imu_sample(
     _ handle: OpaquePointer?,
     _ sample: ArbitImuSample
-) -> Bool
-
-@_silgen_name("arbit_finish_imu_preintegration")
-private func ffi_finish_imu_preintegration(
-    _ handle: OpaquePointer?
 ) -> Bool
 
 @_silgen_name("arbit_last_imu_rotation_prior")
@@ -627,15 +616,6 @@ public final class ArbitCaptureContext: @unchecked Sendable {
         }
     }
     
-    /// Finish the current IMU preintegration interval
-    /// 
-    /// **DEPRECATED**: This is now called automatically when you ingest a camera frame,
-    /// so you no longer need to call this manually. It remains for backwards compatibility.
-    @available(*, deprecated, message: "IMU preintegration is now finished automatically when ingesting camera frames")
-    public func finishIMUPreintegration() {
-        _ = ffi_finish_imu_preintegration(handle)
-    }
-    
     /// Get the last IMU rotation prior (in radians)
     public func lastIMURotationPrior() -> Double? {
         var rotation: Double = 0
@@ -737,11 +717,6 @@ public final class ArbitCaptureContext: @unchecked Sendable {
             samples.append(PoseSample(ffiValue: buffer[index]))
         }
         return samples
-    }
-
-    public func ingestAccelerometer(ax: Double, ay: Double, az: Double, dt: Double) {
-        let sample = ArbitAccelerometerSample(ax: ax, ay: ay, az: az, dt_seconds: dt)
-        _ = ffi_ingest_accelerometer_sample(handle, sample)
     }
 
     public func gravityEstimate() -> GravityVector? {
