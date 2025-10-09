@@ -1,5 +1,8 @@
 pub mod types;
 
+#[cfg(feature = "debug-server")]
+pub mod debug_server;
+
 use std::collections::{HashMap, HashSet};
 
 use arbit_core::img::{build_pyramid, ImageBuffer, Pyramid, PyramidLevel};
