@@ -19,7 +19,7 @@ debug-server = [
     "dep:mcap",
     "dep:utoipa",
     "dep:utoipa-swagger-ui",
-    "dep:ts-rs"
+    "dep:ts-rs",
 ]
 debug-server-lan = ["debug-server"]
 
@@ -30,7 +30,7 @@ log = "0.4"
 nalgebra = "0.34.1"
 serde = { version = "1.0", features = ["derive"] }
 axum = { version = "0.8.6", optional = true }
-tokio = { version = "1.47.1", features = ["rt-multi-thread", "macros", "sync"], optional = true }
+tokio = { version = "1.47.1", features = ["rt", "rt-multi-thread", "macros", "sync", "net", "time"], optional = true }
 tower-http = { version = "0.6.6", features = ["cors", "trace", "timeout"], optional = true }
 serde_json = { version = "1.0.145", optional = true }
 image = { version = "0.25.8", default-features = false, features = ["png", "jpeg"], optional = true }
