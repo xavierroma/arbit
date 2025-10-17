@@ -8,6 +8,7 @@
 import AVFoundation
 import Combine
 import CoreMotion
+import CoreVideo
 import Foundation
 import os.log
 import simd
@@ -50,6 +51,7 @@ final class CameraCaptureManager: NSObject, ObservableObject {
     @Published private(set) var relocalizationSummary: RelocalizationSummary?
     @Published private(set) var lastPoseMatrix: simd_double4x4?
     @Published private(set) var mapStatusMessage: String?
+    private var deviceIntrinsics: CameraIntrinsics?
 
     let session = AVCaptureSession()
 
@@ -194,6 +196,8 @@ final class CameraCaptureManager: NSObject, ObservableObject {
                 self.configureSession()
             }
 
+            self.deviceIntrinsics = self.getDeviceIntrinsics()
+
             guard self.sessionConfigured else { return }
 
             if !self.session.isRunning {
@@ -205,6 +209,109 @@ final class CameraCaptureManager: NSObject, ObservableObject {
             }
         }
     }
+
+    private func getDeviceIntrinsics() -> CameraIntrinsics? {
+        print("DEBUG: getDeviceIntrinsics() called")
+        
+        guard let videoDevice = AVCaptureDevice.default(for: .video) else {
+            print("WARNING: No back camera device found")
+            return nil
+        }
+        
+        print("DEBUG: Using camera device: \(videoDevice.localizedName)")
+        print("DEBUG: Camera device type: \(videoDevice.deviceType.rawValue)")
+
+        let format = videoDevice.activeFormat
+        let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+        let width = Int(dimensions.width)
+        let height = Int(dimensions.height)
+
+        print("DEBUG: Format dimensions: \(width) x \(height)")
+        print("DEBUG: Video field of view: \(format.videoFieldOfView)°")
+        
+        // Try to get extensions - bridge from Core Foundation to Swift
+        if let extensionsCF = CMFormatDescriptionGetExtensions(format.formatDescription) {
+            print("DEBUG: Got CF extensions")
+            
+            // Bridge CFDictionary to NSDictionary to Swift Dictionary
+            let extensionsNS = extensionsCF as NSDictionary
+            if let extensions = extensionsNS as? [String: Any] {
+                print("DEBUG: Successfully bridged to [String: Any]")
+                print("DEBUG: Available extension keys: \(extensions.keys.sorted())")
+            
+                if let data = extensions["CameraIntrinsicMatrix"] as? Data {
+                    return data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) -> CameraIntrinsics? in
+                        // The matrix is stored as 9 floats in column-major order
+                        let floats = ptr.bindMemory(to: Float.self)
+                        guard floats.count >= 9 else {
+                            print("WARNING: Insufficient matrix data")
+                            return nil
+                        }
+                        
+                        // Camera intrinsic matrix (column-major):
+                        // [fx,  0,  0,  0, fy,  0, cx, cy,  1]
+                        //  0   1   2   3   4   5   6   7   8
+                        let fx = Double(floats[0])
+                        let fy = Double(floats[4])
+                        let cx = Double(floats[6])
+                        let cy = Double(floats[7])
+                        
+                        print("DEBUG: Device intrinsics extracted - fx:\(fx), fy:\(fy), cx:\(cx), cy:\(cy)")
+                        
+                        // Validate intrinsics
+                        guard fx > 1.0 && fy > 1.0 else {
+                            print("WARNING: Invalid focal lengths - fx:\(fx), fy:\(fy)")
+                            return nil
+                        }
+                        
+                        return CameraIntrinsics(
+                            fx: fx,
+                            fy: fy,
+                            cx: cx,
+                            cy: cy,
+                            skew: 0.0,
+                            width: UInt32(width),
+                            height: UInt32(height),
+                            distortion: nil
+                        )
+                    }
+                }
+            } else {
+                print("WARNING: Failed to cast CF extensions to [String: Any]")
+            }
+        } else {
+            print("WARNING: CMFormatDescriptionGetExtensions returned nil")
+        }
+        
+        // Fallback: compute from field of view (works even without extensions)
+        let fovX = format.videoFieldOfView
+        print("DEBUG: Video field of view: \(fovX)°")
+        
+        if fovX > 0 {
+            let fovRadians = Double(fovX) * .pi / 180.0
+            let fx = Double(width) / (2.0 * tan(fovRadians / 2.0))
+            let fy = fx // Assume square pixels
+            
+            print("DEBUG: Computed intrinsics from FOV(\(fovX)°) - fx:\(fx), fy:\(fy), cx:\(Double(width) / 2.0), cy:\(Double(height) / 2.0)")
+            print("DEBUG: Final intrinsics - width:\(width), height:\(height)")
+            
+            return CameraIntrinsics(
+                fx: fx,
+                fy: fy,
+                cx: Double(width) / 2.0,
+                cy: Double(height) / 2.0,
+                skew: 0.0,
+                width: UInt32(width),
+                height: UInt32(height),
+                distortion: nil
+            )
+        } else {
+            print("WARNING: FOV is zero or negative: \(fovX)")
+        }
+
+        print("WARNING: No camera intrinsic matrix found and no valid FOV")
+        return nil
+}
 
     private func configureSession() {
         session.beginConfiguration()
@@ -240,6 +347,7 @@ final class CameraCaptureManager: NSObject, ObservableObject {
                 if connection.isVideoRotationAngleSupported(90) {
                     connection.videoRotationAngle = 90
                 }
+                // No rotation needed for default camera - it should match preview orientation
             }
 
         } catch {
@@ -289,9 +397,6 @@ final class CameraCaptureManager: NSObject, ObservableObject {
         guard let context = context else { return }
         
         // Use userAcceleration (linear accel, gravity already removed by iOS)
-        // Note: For iOS, CoreMotion already did high-quality gravity estimation,
-        // so we use the pre-processed data instead of reconstructing raw samples.
-        // The Rust engine will use iOS's gravity estimate instead of computing its own.
         let userAccel = motion.userAcceleration
         
         // Convert from g to m/s²
@@ -455,43 +560,89 @@ extension CameraCaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate {
     private func makeIntrinsics(from sampleBuffer: CMSampleBuffer, pixelBuffer: CVPixelBuffer) -> CameraIntrinsics {
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
-
-        var fx = Double(width)
-        var fy = Double(height)
-        var cx = Double(width) / 2.0
-        var cy = Double(height) / 2.0
-        var skew = 0.0
-
+        
+        // PRIORITY 1: Try to extract from sample buffer attachment (most accurate - reflects actual capture)
+        // This works because we enabled isCameraIntrinsicMatrixDeliveryEnabled in configureSession()
+        
         if let attachment = CMGetAttachment(
             sampleBuffer,
             key: kCMSampleBufferAttachmentKey_CameraIntrinsicMatrix,
             attachmentModeOut: nil
-        ),
-           CFGetTypeID(attachment) == CFDataGetTypeID() {
-            let cfData = unsafeBitCast(attachment, to: CFData.self)
-            let data = cfData as Data
-            data.withUnsafeBytes { (rawPointer: UnsafeRawBufferPointer) in
-                let count = rawPointer.count / MemoryLayout<Float32>.size
-                if count >= 9 {
-                    let values = rawPointer.bindMemory(to: Float32.self)
-                    fx = Double(values[0])
-                    skew = Double(values[1])
-                    cx = Double(values[2])
-                    fy = Double(values[4])
-                    cy = Double(values[5])
-                }
+        ) as? Data {
+            
+            let intrinsics = attachment.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) -> CameraIntrinsics? in
+                let floats = ptr.bindMemory(to: Float.self)
+                guard floats.count >= 9 else { return nil }
+                
+                // Column-major: [fx, 0, 0, 0, fy, 0, cx, cy, 1]
+                let fx = Double(floats[0])
+                let fy = Double(floats[4])
+                let cx = Double(floats[6])
+                let cy = Double(floats[7])
+                
+                guard fx > 1.0 && fy > 1.0 else { return nil }
+                
+                return CameraIntrinsics(
+                    fx: fx,
+                    fy: fy,
+                    cx: cx,
+                    cy: cy,
+                    skew: 0.0,
+                    width: UInt32(width),
+                    height: UInt32(height),
+                    distortion: nil
+                )
+            }
+            
+            if let intrinsics = intrinsics {
+                print("DEBUG: ✓ Using sample buffer intrinsics - fx:\(intrinsics.fx), fy:\(intrinsics.fy)")
+                return intrinsics
             }
         }
-
+        
+        // PRIORITY 2: Use cached device intrinsics, adjusting for 90° rotation
+        if let cached = deviceIntrinsics {
+            // Check if dimensions are swapped (90° rotation applied)
+            if Int(cached.width) == height && Int(cached.height) == width {
+                // Apply 90° clockwise rotation transformation to intrinsics
+                // For 90° rotation: swap fx/fy and transform principal point
+                let rotatedCx = cached.cy
+                let rotatedCy = Double(cached.width) - cached.cx
+                
+                print("DEBUG: ✓ Using cached intrinsics with 90° rotation")
+                print("DEBUG:   Before: \(cached.width)×\(cached.height), fx:\(cached.fx), fy:\(cached.fy), cx:\(cached.cx), cy:\(cached.cy)")
+                print("DEBUG:   After:  \(width)×\(height), fx:\(cached.fy), fy:\(cached.fx), cx:\(rotatedCx), cy:\(rotatedCy)")
+                
+                return CameraIntrinsics(
+                    fx: cached.fy,        // Swap
+                    fy: cached.fx,        // Swap
+                    cx: rotatedCx,        // Transform
+                    cy: rotatedCy,        // Transform
+                    skew: 0.0,
+                    width: UInt32(width),
+                    height: UInt32(height),
+                    distortion: nil)
+            } else {
+                // Dimensions match exactly - no rotation needed
+                print("DEBUG: ✓ Using cached device intrinsics (no rotation)")
+                return cached
+            }
+        }
+        
+        // PRIORITY 3: Ultimate fallback - approximate based on typical iPhone FOV
+        print("WARNING: Using fallback intrinsics (approximate 60° FOV)")
+        let fx = Double(width) * 1.2
+        let fy = Double(height) * 1.2
         return CameraIntrinsics(
             fx: fx,
             fy: fy,
-            cx: cx,
-            cy: cy,
-            skew: skew,
+            cx: Double(width) / 2.0,
+            cy: Double(height) / 2.0,
+            skew: 0.0,
             width: UInt32(width),
             height: UInt32(height),
             distortion: nil
         )
     }
 }
+

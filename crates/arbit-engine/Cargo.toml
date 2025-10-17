@@ -20,6 +20,7 @@ debug-server = [
     "dep:utoipa",
     "dep:utoipa-swagger-ui",
     "dep:ts-rs",
+    "dep:tower",
 ]
 debug-server-lan = ["debug-server"]
 
@@ -41,6 +42,7 @@ metrics = { version = "0.24.2", optional = true }
 metrics-exporter-prometheus = { version = "0.17.2", optional = true }
 mcap = { version = "0.23.3", optional = true }
 utoipa = { version = "5.4.0", features = ["axum_extras"], optional = true }
-utoipa-swagger-ui = { version = "9.0.2", optional = true }
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum"], optional = true }
 ts-rs = { version = "11.0.1", optional = true }
 thiserror = "2.0.17"
+tower = { version = "0.5.2", optional = true, features = ["limit", "timeout", "util"] }

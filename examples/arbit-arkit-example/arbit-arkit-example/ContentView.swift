@@ -765,12 +765,70 @@ private struct TrackedPointsOverlay: View {
             } else {
                 Canvas { context, size in
                     for point in trackedPoints.prefix(200) where point.status == .converged {
-                        let u = CGFloat(point.refined.x) / width
-                        let v = CGFloat(point.refined.y) / height
-                        let x = u * size.width
-                        let y = v * size.height
-                        let rect = CGRect(x: x - 3.0, y: y - 3.0, width: 6.0, height: 6.0)
-                        context.fill(Path(ellipseIn: rect), with: .color(.green))
+                        // Convert initial position to screen coordinates
+                        let u0 = CGFloat(point.initial.x) / width
+                        let v0 = CGFloat(point.initial.y) / height
+                        let x0 = u0 * size.width
+                        let y0 = v0 * size.height
+                        
+                        // Convert refined position to screen coordinates
+                        let u1 = CGFloat(point.refined.x) / width
+                        let v1 = CGFloat(point.refined.y) / height
+                        let x1 = u1 * size.width
+                        let y1 = v1 * size.height
+                        
+                        // Calculate flow magnitude for color coding
+                        let dx = x1 - x0
+                        let dy = y1 - y0
+                        let magnitude = sqrt(dx * dx + dy * dy)
+                        
+                        // Color based on magnitude: green for small, yellow for medium, red for large
+                        let color: Color
+                        if magnitude < 5.0 {
+                            color = .green
+                        } else if magnitude < 15.0 {
+                            color = .yellow
+                        } else {
+                            color = .red
+                        }
+                        
+                        // Draw initial position dot (start of flow)
+                        let startDot = CGRect(x: x0 - 2.0, y: y0 - 2.0, width: 4.0, height: 4.0)
+                        context.fill(Path(ellipseIn: startDot), with: .color(color.opacity(0.5)))
+                        
+                        // Draw flow arrow
+                        if magnitude > 1.0 {
+                            // Draw line from initial to refined
+                            var path = Path()
+                            path.move(to: CGPoint(x: x0, y: y0))
+                            path.addLine(to: CGPoint(x: x1, y: y1))
+                            context.stroke(path, with: .color(color), lineWidth: 2.0)
+                            
+                            // Draw arrowhead (elongated for clear directionality)
+                            let arrowLength: CGFloat = 10.0
+                            let angle = atan2(dy, dx)
+                            let arrowAngle: CGFloat = .pi / 8.0  // Narrower angle for sharper arrow
+                            
+                            let p1 = CGPoint(
+                                x: x1 - arrowLength * cos(angle - arrowAngle),
+                                y: y1 - arrowLength * sin(angle - arrowAngle)
+                            )
+                            let p2 = CGPoint(
+                                x: x1 - arrowLength * cos(angle + arrowAngle),
+                                y: y1 - arrowLength * sin(angle + arrowAngle)
+                            )
+                            
+                            var arrowPath = Path()
+                            arrowPath.move(to: CGPoint(x: x1, y: y1))
+                            arrowPath.addLine(to: p1)
+                            arrowPath.addLine(to: p2)
+                            arrowPath.closeSubpath()
+                            context.fill(arrowPath, with: .color(color))
+                        } else {
+                            // For very small motion, just draw a brighter dot
+                            let endDot = CGRect(x: x1 - 2.5, y: y1 - 2.5, width: 5.0, height: 5.0)
+                            context.fill(Path(ellipseIn: endDot), with: .color(color))
+                        }
                     }
                 }
             }

@@ -178,6 +178,11 @@ impl ProcessingEngine {
         self.preintegrator.is_some()
     }
 
+    /// Returns a reference to the active engine configuration.
+    pub fn config(&self) -> &EngineConfig {
+        &self.config
+    }
+
     /// Ingests an IMU sample (gyroscope + accelerometer) for preintegration.
     /// Call this for each IMU sample between camera frames.
     ///
@@ -522,12 +527,13 @@ impl ProcessingEngine {
             let mut tracks = Vec::with_capacity(seeds.len());
             for seed in seeds.iter().take(256) {
                 // Use IMU rotation prior if available to improve tracking
-                let rotation_prior = self.last_preintegrated.as_ref().map(|p| &p.delta_rotation);
+                // let rotation_prior = self.last_preintegrated.as_ref().map(|p| &p.delta_rotation);
                 let observation = self.tracker.track_with_prior(
                     prev_pyramid,
                     &pyramid,
                     seed.position,
-                    rotation_prior,
+                    None,
+                    Some(intrinsics),
                 );
                 tracks.push(observation);
             }

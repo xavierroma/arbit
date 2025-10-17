@@ -63,12 +63,39 @@ impl TwoViewInitializer {
             );
             return None;
         }
+        // Validate input data is not degenerate
+        for (i, m) in matches.iter().enumerate() {
+            if !m.normalized_a.x.is_finite()
+                || !m.normalized_a.y.is_finite()
+                || !m.normalized_b.x.is_finite()
+                || !m.normalized_b.y.is_finite()
+            {
+                debug!("Match {} has non-finite coordinates, rejecting", i);
+                return None;
+            }
+        }
+
+        // Check for sufficient spread (not all points at origin)
+        let spread_a =
+            matches.iter().map(|m| m.normalized_a.norm()).sum::<f64>() / matches.len() as f64;
+        let spread_b =
+            matches.iter().map(|m| m.normalized_b.norm()).sum::<f64>() / matches.len() as f64;
+
+        if spread_a < 1e-6 || spread_b < 1e-6 {
+            debug!(
+                "Matches have insufficient spread (a:{:.6}, b:{:.6}), rejecting",
+                spread_a, spread_b
+            );
+            return None;
+        }
+
+        debug!("Input validation passed, proceeding with RANSAC");
 
         let mut rng = SmallRng::from_entropy();
         let mut best_inliers = Vec::new();
-        trace!("Running {} RANSAC iterations", self.params.iterations);
+        debug!("Running {} RANSAC iterations", self.params.iterations);
 
-        for _ in 0..self.params.iterations {
+        for iter_count in 0..self.params.iterations {
             let sample_indices = sample(&mut rng, matches.len(), 8);
             let mut subset = [FeatureMatch {
                 normalized_a: Vector2::zeros(),
@@ -78,14 +105,29 @@ impl TwoViewInitializer {
                 *dst = matches[idx];
             }
 
+            // Add validation before expensive SVD
+            trace!("RANSAC iteration {}: sampled indices", iter_count);
+
+            trace!("About to call estimate_essential with 8 samples");
             let e_candidate = estimate_essential(&subset);
+            trace!("RANSAC iteration {}: essential matrix computed", iter_count);
+
             if !e_candidate.iter().all(|v| v.is_finite()) {
+                trace!(
+                    "RANSAC iteration {}: non-finite essential matrix, skipping",
+                    iter_count
+                );
                 continue;
             }
 
             let inliers = score_inliers(matches, &e_candidate, self.params.threshold);
             if inliers.len() > best_inliers.len() {
                 best_inliers = inliers;
+                debug!(
+                    "RANSAC iteration {}: new best with {} inliers",
+                    iter_count,
+                    best_inliers.len()
+                );
             }
         }
 
@@ -105,31 +147,37 @@ impl TwoViewInitializer {
         let refined_e = estimate_essential(&inlier_matches);
 
         let decomposition = choose_pose(&refined_e, &inlier_matches)?;
-        let (avg_error, final_inliers) = evaluate_model(matches, &refined_e, self.params.threshold);
+        let avg_error = inlier_matches
+            .iter()
+            .map(|m| sampson_error(&refined_e, m))
+            .sum::<f64>()
+            / (inlier_matches.len() as f64);
 
         let identity_projection =
             Matrix3x4::new(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
         let candidate_projection =
             compose_projection(&decomposition.rotation, &decomposition.translation);
 
-        let mut landmarks = Vec::with_capacity(final_inliers.len());
-        for &idx in &final_inliers {
+        let mut landmarks = Vec::with_capacity(best_inliers.len());
+
+        for &idx in &best_inliers {
             if let Some(point) =
                 triangulate(&identity_projection, &candidate_projection, &matches[idx])
             {
                 landmarks.push((idx, point));
             }
         }
-
+        if landmarks.len() < 8 {
+            debug!(
+                "Two-view initialization failed: insufficient triangulations ({}/{})",
+                landmarks.len(),
+                best_inliers.len()
+            );
+            return None;
+        }
         debug!(
-            "Two-view initialization landmarks: {} / {}",
-            landmarks.len(),
-            final_inliers.len()
-        );
-
-        debug!(
-            "Two-view initialization successful: {} final inliers, avg error: {:.6}",
-            final_inliers.len(),
+            "Two-view initialization successful: {} inliers, avg error: {:.6}",
+            inlier_matches.len(),
             avg_error
         );
 
@@ -137,7 +185,7 @@ impl TwoViewInitializer {
             essential: refined_e,
             rotation: decomposition.rotation,
             translation: decomposition.translation,
-            inliers: final_inliers,
+            inliers: best_inliers,
             average_sampson_error: avg_error,
             landmarks,
         })
@@ -244,9 +292,6 @@ fn enforce_rank2(e: &mut Matrix3<f64>) {
     let svd = nalgebra::SVD::new(*e, true, true);
     let mut singular = svd.singular_values;
     if singular.len() >= 3 {
-        let avg = 0.5 * (singular[0] + singular[1]);
-        singular[0] = avg;
-        singular[1] = avg;
         singular[2] = 0.0;
     }
     let u = svd.u.unwrap();
@@ -263,29 +308,6 @@ fn score_inliers(matches: &[FeatureMatch], essential: &Matrix3<f64>, threshold: 
         }
     }
     inliers
-}
-
-fn evaluate_model(
-    matches: &[FeatureMatch],
-    essential: &Matrix3<f64>,
-    threshold: f64,
-) -> (f64, Vec<usize>) {
-    let mut errors = Vec::new();
-    let mut inliers = Vec::new();
-    for (idx, m) in matches.iter().enumerate() {
-        let err = sampson_error(essential, m);
-        if err < threshold {
-            inliers.push(idx);
-            errors.push(err);
-        }
-    }
-
-    let average = if errors.is_empty() {
-        f64::MAX
-    } else {
-        errors.iter().sum::<f64>() / (errors.len() as f64)
-    };
-    (average, inliers)
 }
 
 fn sampson_error(e: &Matrix3<f64>, match_pair: &FeatureMatch) -> f64 {

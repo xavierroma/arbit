@@ -349,6 +349,14 @@ fn build_arkit_frame(frame: &ArbitCameraFrame) -> Option<ArKitFrame> {
         return None;
     }
 
+    if intrinsics.fx.abs() < 1e-6 || intrinsics.fy.abs() < 1e-6 {
+        warn!(
+            "Rejecting frame with invalid focal lengths: fx={}, fy={}",
+            intrinsics.fx, intrinsics.fy
+        );
+        return None;
+    }
+
     if frame.data.is_null() || frame.data_len == 0 {
         return None;
     }

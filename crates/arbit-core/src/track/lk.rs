@@ -1,11 +1,15 @@
 use crate::img::pyramid::{Pyramid, PyramidLevel};
-use crate::math::SO3;
+use crate::math::{CameraIntrinsics, SO3};
 use log::{debug, trace};
 use nalgebra::{Vector2, Vector3};
 
 /// Apply a rotation to a pixel position, assuming unit focal length.
 /// This is a simplified approximation for small rotations.
-fn apply_rotation_to_pixel(pixel: Vector2<f32>, rotation: &SO3) -> Vector2<f32> {
+fn apply_rotation_to_pixel(
+    pixel: Vector2<f32>,
+    rotation: &SO3,
+    intrinsics: &CameraIntrinsics,
+) -> Vector2<f32> {
     // For small rotations, we can approximate the effect on pixel coordinates
     // by rotating a ray in normalized image coordinates
     // This is a first-order approximation that works well for IMU-rate rotations
@@ -16,9 +20,13 @@ fn apply_rotation_to_pixel(pixel: Vector2<f32>, rotation: &SO3) -> Vector2<f32> 
         return pixel;
     }
 
-    // Convert pixel to normalized coordinates (assuming unit focal length, adjust if needed)
-    // For a more accurate version, you'd need camera intrinsics here
-    let ray = Vector3::new(pixel.x as f64, pixel.y as f64, 1.0).normalize();
+    // Convert pixel to normalized coordinates
+    let ray = Vector3::new(
+        ((pixel.x as f64 - intrinsics.cx) / intrinsics.fx) as f64,
+        ((pixel.y as f64 - intrinsics.cy) / intrinsics.fy) as f64,
+        1.0,
+    )
+    .normalize();
 
     // Rotate the ray
     let rotated_ray = rotation.unit_quaternion() * ray;
@@ -30,8 +38,8 @@ fn apply_rotation_to_pixel(pixel: Vector2<f32>, rotation: &SO3) -> Vector2<f32> 
 
     let scale = 1.0 / rotated_ray.z;
     Vector2::new(
-        (rotated_ray.x * scale) as f32,
-        (rotated_ray.y * scale) as f32,
+        (rotated_ray.x * scale * intrinsics.fx + intrinsics.cx) as f32,
+        (rotated_ray.y * scale * intrinsics.fy + intrinsics.cy) as f32,
     )
 }
 
@@ -86,7 +94,7 @@ impl Tracker {
         curr: &Pyramid,
         initial_position: Vector2<f32>,
     ) -> TrackObservation {
-        self.track_with_prior(prev, curr, initial_position, None)
+        self.track_with_prior(prev, curr, initial_position, None, None)
     }
 
     /// Track with an optional rotation prior from IMU.
@@ -96,6 +104,7 @@ impl Tracker {
         curr: &Pyramid,
         initial_position: Vector2<f32>,
         rotation_prior: Option<&SO3>,
+        intrinsics: Option<&CameraIntrinsics>,
     ) -> TrackObservation {
         trace!(
             "Tracking feature from {:?} across {} pyramid levels (rotation_prior: {})",
@@ -105,11 +114,12 @@ impl Tracker {
         );
 
         // Apply rotation prior to improve initial guess if available
-        let mut current_base = if let Some(rotation) = rotation_prior {
-            apply_rotation_to_pixel(initial_position, rotation)
-        } else {
-            initial_position
-        };
+        let mut current_base =
+            if let (Some(rotation), Some(intrinsics)) = (rotation_prior, intrinsics) {
+                apply_rotation_to_pixel(initial_position, rotation, intrinsics)
+            } else {
+                initial_position
+            };
 
         let mut total_iterations = 0u32;
         let mut residual = 0.0f32;
