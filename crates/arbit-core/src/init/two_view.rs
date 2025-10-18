@@ -105,7 +105,6 @@ impl TwoViewInitializer {
                 *dst = matches[idx];
             }
 
-            // Add validation before expensive SVD
             trace!("RANSAC iteration {}: sampled indices", iter_count);
 
             trace!("About to call estimate_essential with 8 samples");
@@ -210,6 +209,7 @@ impl TwoViewInitialization {
     }
 }
 
+// Estimate the essential matrix from a set of feature matches; this is in epipolar geometry, the R and t are the rotation and translation of the second camera relative to the first, which once known can be used to triangulate 3D points.
 fn estimate_essential(matches: &[FeatureMatch]) -> Matrix3<f64> {
     let (points_a, t_a) = normalize_points(matches.iter().map(|m| m.normalized_a).collect());
     let (points_b, t_b) = normalize_points(matches.iter().map(|m| m.normalized_b).collect());

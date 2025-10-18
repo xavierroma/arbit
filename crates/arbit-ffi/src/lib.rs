@@ -310,6 +310,36 @@ impl Default for ArbitTransform {
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
+pub struct ArbitProjectedAnchor {
+    pub anchor_id: u64,
+    pub pose: ArbitTransform,
+    pub created_from_keyframe: u64,
+    pub has_keyframe: bool,
+    pub normalized_u: f64,
+    pub normalized_v: f64,
+    pub pixel_x: f32,
+    pub pixel_y: f32,
+    pub depth: f64,
+}
+
+impl Default for ArbitProjectedAnchor {
+    fn default() -> Self {
+        Self {
+            anchor_id: 0,
+            pose: ArbitTransform::default(),
+            created_from_keyframe: 0,
+            has_keyframe: false,
+            normalized_u: 0.0,
+            normalized_v: 0.0,
+            pixel_x: 0.0,
+            pixel_y: 0.0,
+            depth: 0.0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
 pub struct ArbitRelocalizationSummary {
     pub pose: ArbitTransform,
     pub inliers: u32,
@@ -816,6 +846,87 @@ pub unsafe extern "C" fn arbit_update_anchor(
     };
 
     context.engine.update_anchor(anchor_id, transform)
+}
+
+/// Removes an anchor
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arbit_remove_anchor(
+    handle: *mut ArbitCaptureContextHandle,
+    anchor_id: u64,
+) -> bool {
+    if handle.is_null() {
+        return false;
+    }
+
+    let context = handle_to_context(handle);
+    context.engine.remove_anchor(anchor_id)
+}
+
+/// Places an anchor by raycasting from a screen point
+/// normalized_u, normalized_v should be in range [0, 1]
+/// depth is in meters
+/// Returns the new anchor ID or 0 on failure
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arbit_place_anchor_at_screen_point(
+    handle: *mut ArbitCaptureContextHandle,
+    normalized_u: f64,
+    normalized_v: f64,
+    depth: f64,
+    out_anchor_id: *mut u64,
+) -> bool {
+    if handle.is_null() {
+        return false;
+    }
+
+    let context = handle_to_context(handle);
+
+    if let Some(anchor_id) =
+        context
+            .engine
+            .place_anchor_at_screen_point(normalized_u, normalized_v, depth)
+    {
+        if !out_anchor_id.is_null() {
+            unsafe {
+                *out_anchor_id = anchor_id;
+            }
+        }
+        true
+    } else {
+        false
+    }
+}
+
+/// Gets all visible anchors in the current camera frame
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arbit_get_visible_anchors(
+    handle: *mut ArbitCaptureContextHandle,
+    out_anchors: *mut ArbitProjectedAnchor,
+    max_anchors: usize,
+) -> usize {
+    if handle.is_null() || out_anchors.is_null() || max_anchors == 0 {
+        return 0;
+    }
+
+    let context = handle_to_context(handle);
+    let visible = context.engine.get_visible_anchors();
+    let count = visible.len().min(max_anchors);
+    let dest = unsafe { slice::from_raw_parts_mut(out_anchors, count) };
+
+    for (dst, projected) in dest.iter_mut().zip(visible.iter()) {
+        *dst = ArbitProjectedAnchor {
+            anchor_id: projected.anchor.id,
+            pose: transform_to_ffi(&projected.anchor.pose),
+            created_from_keyframe: projected.anchor.created_from_keyframe.unwrap_or(0),
+            has_keyframe: projected.anchor.created_from_keyframe.is_some(),
+            normalized_u: projected.normalized_u,
+            normalized_v: projected.normalized_v,
+            pixel_x: projected.pixel_x,
+            pixel_y: projected.pixel_y,
+            depth: projected.depth,
+        };
+    }
+
+    count
 }
 
 /// Saves map to buffer

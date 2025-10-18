@@ -213,6 +213,28 @@ private func ffi_update_anchor(
     _ pose: UnsafePointer<ArbitFFI.ArbitTransform>?
 ) -> Bool
 
+@_silgen_name("arbit_remove_anchor")
+private func ffi_remove_anchor(
+    _ handle: OpaquePointer?,
+    _ anchorId: UInt64
+) -> Bool
+
+@_silgen_name("arbit_place_anchor_at_screen_point")
+private func ffi_place_anchor_at_screen_point(
+    _ handle: OpaquePointer?,
+    _ normalizedU: Double,
+    _ normalizedV: Double,
+    _ depth: Double,
+    _ outAnchorId: UnsafeMutablePointer<UInt64>?
+) -> Bool
+
+@_silgen_name("arbit_get_visible_anchors")
+private func ffi_get_visible_anchors(
+    _ handle: OpaquePointer?,
+    _ outAnchors: UnsafeMutablePointer<ArbitFFI.ArbitProjectedAnchor>?,
+    _ maxAnchors: Int
+) -> Int
+
 @_silgen_name("arbit_save_map")
 private func ffi_save_map(
     _ handle: OpaquePointer?,
@@ -510,6 +532,35 @@ public struct MapStats: Sendable {
     }
 }
 
+/// An anchor projected into screen space with visibility information
+public struct ProjectedAnchor: Sendable {
+    /// The anchor identifier
+    public let anchorId: UInt64
+    /// The anchor's world pose (4x4 transformation matrix)
+    public let pose: simd_double4x4
+    /// Optional keyframe ID this anchor was created from
+    public let createdFromKeyframe: UInt64?
+    /// Normalized image coordinates in range [0, 1]
+    public let normalizedU: Double
+    public let normalizedV: Double
+    /// Pixel coordinates in the current frame
+    public let pixelX: Float
+    public let pixelY: Float
+    /// Depth from camera in meters
+    public let depth: Double
+    
+    init(ffiValue: ArbitFFI.ArbitProjectedAnchor) {
+        anchorId = ffiValue.anchor_id
+        pose = matrixFromArbitTransform(ffiValue.pose)
+        createdFromKeyframe = ffiValue.has_keyframe ? ffiValue.created_from_keyframe : nil
+        normalizedU = ffiValue.normalized_u
+        normalizedV = ffiValue.normalized_v
+        pixelX = ffiValue.pixel_x
+        pixelY = ffiValue.pixel_y
+        depth = ffiValue.depth
+    }
+}
+
 public struct RelocalizationSummary: Sendable {
     public var pose: simd_double4x4
     public var inliers: UInt32
@@ -752,6 +803,48 @@ public final class ArbitCaptureContext: @unchecked Sendable {
         return withUnsafePointer(to: &transform) { pointer in
             ffi_update_anchor(handle, anchorId, pointer)
         }
+    }
+    
+    /// Remove an anchor by its identifier
+    /// - Parameter anchorId: The identifier of the anchor to remove
+    /// - Returns: `true` if the anchor was removed, `false` if it didn't exist
+    public func removeAnchor(_ anchorId: UInt64) -> Bool {
+        ffi_remove_anchor(handle, anchorId)
+    }
+    
+    /// Place an anchor by raycasting from a screen point into the scene
+    /// The engine uses its current camera pose and intrinsics to compute the world position
+    /// - Parameters:
+    ///   - normalizedU: Horizontal screen coordinate in range [0, 1]
+    ///   - normalizedV: Vertical screen coordinate in range [0, 1]
+    ///   - depth: Distance along the ray in meters (default: 1.0)
+    /// - Returns: The new anchor ID, or `nil` if placement failed
+    public func placeAnchorAtScreenPoint(
+        normalizedU: Double,
+        normalizedV: Double,
+        depth: Double = 1.0
+    ) -> UInt64? {
+        var anchorId: UInt64 = 0
+        let success = ffi_place_anchor_at_screen_point(
+            handle,
+            normalizedU,
+            normalizedV,
+            depth,
+            &anchorId
+        )
+        return success ? anchorId : nil
+    }
+    
+    /// Get all anchors visible in the current camera frame with their projected screen coordinates
+    /// - Parameter maxCount: Maximum number of anchors to return (default: 32)
+    /// - Returns: Array of projected anchors that are visible (in front of camera and within frame bounds)
+    public func getVisibleAnchors(maxCount: Int = 32) -> [ProjectedAnchor] {
+        var buffer = [ArbitFFI.ArbitProjectedAnchor](
+            repeating: ArbitFFI.ArbitProjectedAnchor(),
+            count: maxCount
+        )
+        let written = ffi_get_visible_anchors(handle, &buffer, maxCount)
+        return buffer.prefix(written).map { ProjectedAnchor(ffiValue: $0) }
     }
 
     public func saveMap() throws -> Data {

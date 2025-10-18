@@ -276,6 +276,10 @@ impl WorldMap {
         self.landmarks.len()
     }
 
+    pub fn landmark(&self, id: u64) -> Option<&MapLandmark> {
+        self.landmarks.get(&id)
+    }
+
     pub fn keyframe(&self, id: u64) -> Option<&KeyframeData> {
         self.keyframes.get(&id)
     }
@@ -340,6 +344,10 @@ impl WorldMap {
 
     pub fn anchors(&self) -> impl Iterator<Item = &Anchor> {
         self.anchors.values()
+    }
+
+    pub fn remove_anchor(&mut self, id: u64) -> bool {
+        self.anchors.remove(&id).is_some()
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, MapIoError> {

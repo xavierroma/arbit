@@ -4,6 +4,7 @@ pub mod types;
 pub mod debug_server;
 
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use arbit_core::img::{build_pyramid, ImageBuffer, Pyramid, PyramidLevel};
 use arbit_core::imu::{
@@ -27,6 +28,7 @@ use arbit_core::track::{
 use arbit_core::vo::{FrameObservation, VoLoop, VoLoopConfig, VoStatus};
 use arbit_providers::CameraSample;
 use log::{debug, info, warn};
+use nalgebra::Point3;
 use nalgebra::{Translation3, UnitQuaternion, Vector2, Vector3};
 
 /// Processing constants grouped into a configuration structure.
@@ -68,9 +70,36 @@ pub struct PyramidLevelCache {
     pub pixels: Vec<u8>,
 }
 
+/// Tracking state distinguishing between initialization and normal tracking phases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrackingState {
+    /// Waiting for first frame and feature initialization
+    Uninitialized,
+    /// First frame received, tracking features but no map yet
+    TrackingPreInit,
+    /// Map initialized, using PnP for pose estimation
+    Tracking,
+}
+
+/// An anchor projected into the current camera frame with screen coordinates.
+#[derive(Debug, Clone)]
+pub struct ProjectedAnchor {
+    /// The underlying anchor data
+    pub anchor: Anchor,
+    /// Normalized image coordinates (u, v) in range [0, 1]
+    pub normalized_u: f64,
+    pub normalized_v: f64,
+    /// Pixel coordinates in the current frame
+    pub pixel_x: f32,
+    pub pixel_y: f32,
+    /// Depth from camera (distance along optical axis)
+    pub depth: f64,
+}
+
 /// Processing engine that encapsulates the full camera/IMU pipeline.
 pub struct ProcessingEngine {
     config: EngineConfig,
+    tracking_state: TrackingState,
     last_intrinsics: Option<CameraIntrinsics>,
     prev_pyramid: Option<Pyramid>,
     pyramid_cache: Vec<PyramidLevelCache>,
@@ -89,6 +118,8 @@ pub struct ProcessingEngine {
     frame_index: u64,
     last_relocalization: Option<PnPResult>,
     last_keyframe_id: Option<u64>,
+    // Track indexed landmarks for PnP
+    tracked_landmark_ids: HashMap<usize, u64>,
     // IMU preintegration components
     preintegrator: Option<ImuPreintegrator>,
     motion_detector: Option<MotionDetector>,
@@ -115,6 +146,7 @@ impl ProcessingEngine {
 
         let mut engine = Self {
             config,
+            tracking_state: TrackingState::Uninitialized,
             last_intrinsics: None,
             prev_pyramid: None,
             pyramid_cache: Vec::new(),
@@ -133,6 +165,7 @@ impl ProcessingEngine {
             frame_index: 0,
             last_relocalization: None,
             last_keyframe_id: None,
+            tracked_landmark_ids: HashMap::new(),
             preintegrator: None,
             motion_detector: None,
             gyro_bias_estimator: None,
@@ -435,6 +468,122 @@ impl ProcessingEngine {
         self.map.create_anchor(pose, hint)
     }
 
+    /// Remove an anchor by identifier. Returns true if the anchor existed and was removed.
+    pub fn remove_anchor(&mut self, anchor_id: u64) -> bool {
+        self.map.remove_anchor(anchor_id)
+    }
+
+    /// Place an anchor at a screen position by raycasting into the scene.
+    /// Returns the anchor ID if successful.
+    ///
+    /// - `normalized_u`, `normalized_v`: Normalized image coordinates in range [0, 1]
+    /// - `depth`: Distance along the ray in meters (default: 1.0)
+    pub fn place_anchor_at_screen_point(
+        &mut self,
+        normalized_u: f64,
+        normalized_v: f64,
+        depth: f64,
+    ) -> Option<u64> {
+        let intrinsics = self.last_intrinsics.as_ref()?;
+
+        // Convert normalized [0,1] to pixel coordinates
+        let pixel_x = normalized_u * intrinsics.width as f64;
+        let pixel_y = normalized_v * intrinsics.height as f64;
+
+        // Back-project to normalized camera coordinates (ray direction)
+        let ndc_x = (pixel_x - intrinsics.cx) / intrinsics.fx;
+        let ndc_y = (pixel_y - intrinsics.cy) / intrinsics.fy;
+
+        // Ray direction in camera space (normalized)
+        let ray_camera = Vector3::new(ndc_x, ndc_y, 1.0).normalize();
+
+        // Transform ray from camera space to world space using current pose
+        let rotation = self.current_pose.rotation.to_rotation_matrix();
+        let ray_world = rotation * ray_camera;
+
+        // Calculate anchor position: camera position + ray * depth
+        let camera_position = self.current_pose.translation.vector;
+        let anchor_position = camera_position + ray_world * depth;
+
+        // Create pose at anchor position (identity rotation)
+        let anchor_pose = TransformSE3::from_parts(
+            Translation3::from(anchor_position),
+            UnitQuaternion::identity(),
+        );
+
+        let anchor_id = self.create_anchor(anchor_pose);
+        info!(
+            target: "arbit_engine",
+            "Placed anchor #{} at world position [{:.2}, {:.2}, {:.2}] (depth: {:.2}m)",
+            anchor_id,
+            anchor_position.x,
+            anchor_position.y,
+            anchor_position.z,
+            depth
+        );
+
+        Some(anchor_id)
+    }
+
+    /// Get all anchors that are visible in the current camera frame with their projected coordinates.
+    /// Returns anchors that are:
+    /// - In front of the camera (positive depth)
+    /// - Within the frame bounds
+    pub fn get_visible_anchors(&self) -> Vec<ProjectedAnchor> {
+        let Some(intrinsics) = &self.last_intrinsics else {
+            return Vec::new();
+        };
+
+        self.map
+            .anchors()
+            .filter_map(|anchor| self.project_anchor_internal(anchor, intrinsics))
+            .collect()
+    }
+
+    /// Helper to project a single anchor to screen space
+    fn project_anchor_internal(
+        &self,
+        anchor: &Anchor,
+        intrinsics: &CameraIntrinsics,
+    ) -> Option<ProjectedAnchor> {
+        // Extract world position from anchor pose (translation component)
+        let world_position = Point3::from(anchor.pose.translation.vector);
+
+        // Transform to camera frame
+        let camera_point = self.current_pose.transform_point(&world_position);
+
+        // Check if in front of camera
+        if camera_point.z <= 0.0 {
+            return None;
+        }
+
+        // Project to normalized image coordinates
+        let normalized_u = camera_point.x / camera_point.z;
+        let normalized_v = camera_point.y / camera_point.z;
+
+        // Convert to pixel coordinates
+        let pixel_x = (normalized_u * intrinsics.fx + intrinsics.cx) as f32;
+        let pixel_y = (normalized_v * intrinsics.fy + intrinsics.cy) as f32;
+
+        // Check if within frame bounds
+        if pixel_x < 0.0
+            || pixel_x >= intrinsics.width as f32
+            || pixel_y < 0.0
+            || pixel_y >= intrinsics.height as f32
+        {
+            return None;
+        }
+
+        Some(ProjectedAnchor {
+            anchor: anchor.clone(),
+            normalized_u,
+            normalized_v,
+            pixel_x,
+            pixel_y,
+            depth: camera_point.z,
+        })
+    }
+
     /// Serialize the current map to a binary payload.
     pub fn save_map(&self) -> Result<Vec<u8>, MapIoError> {
         self.map.to_bytes()
@@ -550,73 +699,30 @@ impl ProcessingEngine {
                 converged_tracks
             );
 
-            self.last_tracks = tracks;
+            self.last_tracks = tracks.clone();
 
-            if let Some(prev_intr) = prev_intrinsics {
-                let descriptor_start = Instant::now();
-                let descriptor_prev = build_descriptor(
-                    &self.last_tracks,
-                    prev_intr.width,
-                    prev_intr.height,
-                    DescriptorSample::Initial,
-                );
-                let descriptor_elapsed = descriptor_start.elapsed().as_secs_f64() * 1000.0;
-                debug!("      Descriptor build (prev): {:.2}ms", descriptor_elapsed);
-
-                let match_start = Instant::now();
-                let matches_indexed =
-                    build_feature_matches(&self.last_tracks, prev_intr, intrinsics);
-                let matches: Vec<FeatureMatch> = matches_indexed
-                    .iter()
-                    .map(|(_, feature)| *feature)
-                    .collect();
-                let match_elapsed = match_start.elapsed().as_secs_f64() * 1000.0;
-
-                debug!(
-                    "      Feature matching: {:.2}ms ({} matches)",
-                    match_elapsed,
-                    matches.len()
-                );
-
-                if matches.len() >= 8 {
-                    let two_view_start = Instant::now();
-                    if let Some(two_view) = self.two_view_initializer.estimate(&matches) {
-                        let two_view_elapsed = two_view_start.elapsed().as_secs_f64() * 1000.0;
-                        debug!("      Two-view init: {:.2}ms (SUCCESS)", two_view_elapsed);
-
-                        let keyframe_start = Instant::now();
-                        let prev_pose = self.current_pose.clone();
-                        let scaled_two_view = two_view.scaled(self.config.baseline_scale);
-                        self.try_insert_keyframe(
-                            &prev_pose,
-                            descriptor_prev,
-                            &scaled_two_view,
-                            &matches_indexed,
-                        );
-                        let keyframe_elapsed = keyframe_start.elapsed().as_secs_f64() * 1000.0;
-                        debug!("      Keyframe insertion: {:.2}ms", keyframe_elapsed);
-
-                        self.current_pose = update_pose(&self.current_pose, &scaled_two_view);
-                        self.trajectory.push(self.current_pose.translation.vector);
-                        if self.trajectory.len() > self.config.max_trajectory_points {
-                            let trim = self.trajectory.len() - self.config.max_trajectory_points;
-                            self.trajectory.drain(0..trim);
-                        }
-                        self.last_two_view = Some(scaled_two_view);
-                    } else {
-                        let two_view_elapsed = two_view_start.elapsed().as_secs_f64() * 1000.0;
-                        debug!("      Two-view init: {:.2}ms (FAILED)", two_view_elapsed);
-                        self.last_two_view = None;
-                    }
-                } else {
-                    self.last_two_view = None;
-                    debug!(
-                        "Insufficient matches ({}) for two-view initialization",
-                        matches.len()
-                    );
+            // State machine: handle initialization vs tracking
+            match self.tracking_state {
+                TrackingState::Uninitialized => {
+                    // First frame: just start tracking
+                    self.tracking_state = TrackingState::TrackingPreInit;
+                    debug!("First frame received, state -> TrackingPreInit");
                 }
-            } else {
-                debug!("No previous intrinsics available for two-view initialization");
+                TrackingState::TrackingPreInit => {
+                    // Second frame onwards: try two-view initialization
+                    if let Some(prev_intr) = prev_intrinsics {
+                        self.handle_initialization(
+                            &tracks,
+                            prev_intr,
+                            intrinsics,
+                            timestamp_seconds,
+                        );
+                    }
+                }
+                TrackingState::Tracking => {
+                    // Map initialized: use PnP for pose estimation
+                    self.handle_tracking_with_pnp(&tracks, intrinsics);
+                }
             }
         }
 
@@ -631,7 +737,173 @@ impl ProcessingEngine {
         self.handle_vo_update(timestamp_seconds, &descriptor_current);
     }
 
-    fn try_insert_keyframe(
+    /// Handles two-view initialization and gravity-aligned map creation
+    fn handle_initialization(
+        &mut self,
+        tracks: &[TrackObservation],
+        prev_intrinsics: &CameraIntrinsics,
+        curr_intrinsics: &CameraIntrinsics,
+        _timestamp_seconds: f64,
+    ) {
+        let descriptor_start = Instant::now();
+        let descriptor_prev = build_descriptor(
+            tracks,
+            prev_intrinsics.width,
+            prev_intrinsics.height,
+            DescriptorSample::Initial,
+        );
+        let descriptor_elapsed = descriptor_start.elapsed().as_secs_f64() * 1000.0;
+        debug!("      Descriptor build (prev): {:.2}ms", descriptor_elapsed);
+
+        let match_start = Instant::now();
+        let matches_indexed = build_feature_matches(tracks, prev_intrinsics, curr_intrinsics);
+        let matches: Vec<FeatureMatch> = matches_indexed
+            .iter()
+            .map(|(_, feature)| *feature)
+            .collect();
+        let match_elapsed = match_start.elapsed().as_secs_f64() * 1000.0;
+
+        debug!(
+            "      Feature matching: {:.2}ms ({} matches)",
+            match_elapsed,
+            matches.len()
+        );
+
+        if matches.len() < 8 {
+            debug!(
+                "Insufficient matches ({}) for two-view initialization",
+                matches.len()
+            );
+            return;
+        }
+
+        let two_view_start = Instant::now();
+        let Some(two_view) = self.two_view_initializer.estimate(&matches) else {
+            let two_view_elapsed = two_view_start.elapsed().as_secs_f64() * 1000.0;
+            debug!("      Two-view init: {:.2}ms (FAILED)", two_view_elapsed);
+            return;
+        };
+
+        let two_view_elapsed = two_view_start.elapsed().as_secs_f64() * 1000.0;
+        debug!("      Two-view init: {:.2}ms (SUCCESS)", two_view_elapsed);
+
+        // Apply gravity alignment if available
+        let world_alignment = if let Some(gravity) = &self.last_gravity {
+            align_world_to_gravity(gravity)
+        } else {
+            warn!(target: "arbit_engine", "No gravity estimate available for initialization, using identity alignment");
+            TransformSE3::identity()
+        };
+
+        // Scale and apply world alignment
+        let scaled_two_view = two_view.scaled(self.config.baseline_scale);
+        let landmark_count = scaled_two_view.landmarks.len();
+
+        // Set initial pose: first camera at aligned origin
+        let initial_pose = world_alignment.clone();
+        self.current_pose = initial_pose.clone();
+
+        // Insert first keyframe at aligned origin
+        let keyframe_start = Instant::now();
+        self.try_insert_keyframe_with_landmarks(
+            &initial_pose,
+            descriptor_prev,
+            &scaled_two_view,
+            &matches_indexed,
+        );
+        let keyframe_elapsed = keyframe_start.elapsed().as_secs_f64() * 1000.0;
+        debug!("      Keyframe insertion: {:.2}ms", keyframe_elapsed);
+
+        // Update pose for second frame
+        self.current_pose = update_pose(&initial_pose, &scaled_two_view);
+        self.trajectory.push(self.current_pose.translation.vector);
+
+        // Transition to tracking mode
+        self.tracking_state = TrackingState::Tracking;
+        self.last_two_view = Some(scaled_two_view);
+
+        info!(
+            "Map initialized with {} landmarks, gravity-aligned world frame",
+            landmark_count
+        );
+    }
+
+    /// Handles pose estimation using PnP with tracked features
+    fn handle_tracking_with_pnp(
+        &mut self,
+        tracks: &[TrackObservation],
+        intrinsics: &CameraIntrinsics,
+    ) {
+        // Build observations from tracked features that have known landmark IDs
+        let mut observations = Vec::new();
+
+        for (track_idx, track) in tracks.iter().enumerate() {
+            if !matches!(track.outcome, TrackOutcome::Converged) {
+                continue;
+            }
+
+            // Check if we have a landmark ID for this track
+            if let Some(&landmark_id) = self.tracked_landmark_ids.get(&track_idx) {
+                // Get the 3D position from the map
+                if let Some(landmark) = self.map.landmark(landmark_id) {
+                    let normalized = normalize_pixel(track.refined, intrinsics);
+                    observations.push(PnPObservation {
+                        world_point: landmark.position,
+                        normalized_image: normalized,
+                    });
+                }
+            }
+        }
+
+        debug!(
+            "      PnP tracking: {} observations from {} tracks",
+            observations.len(),
+            tracks.len()
+        );
+
+        if observations.len() < self.config.relocalization_min_inliers {
+            warn!(
+                "Insufficient PnP observations ({} < {}), attempting relocalization",
+                observations.len(),
+                self.config.relocalization_min_inliers
+            );
+            // Fall back to relocalization
+            self.tracking_state = TrackingState::TrackingPreInit;
+            self.tracked_landmark_ids.clear();
+            return;
+        }
+
+        let pnp_start = Instant::now();
+        let Some(result) = self.pnp.estimate(&observations) else {
+            let pnp_elapsed = pnp_start.elapsed().as_secs_f64() * 1000.0;
+            warn!(
+                "      PnP estimation: {:.2}ms (FAILED), falling back",
+                pnp_elapsed
+            );
+            self.tracking_state = TrackingState::TrackingPreInit;
+            self.tracked_landmark_ids.clear();
+            return;
+        };
+
+        let pnp_elapsed = pnp_start.elapsed().as_secs_f64() * 1000.0;
+        debug!(
+            "      PnP estimation: {:.2}ms ({} inliers, error: {:.4})",
+            pnp_elapsed,
+            result.inliers.len(),
+            result.average_reprojection_error
+        );
+
+        // Update current pose
+        self.current_pose = result.pose.clone();
+        self.trajectory.push(self.current_pose.translation.vector);
+        if self.trajectory.len() > self.config.max_trajectory_points {
+            let trim = self.trajectory.len() - self.config.max_trajectory_points;
+            self.trajectory.drain(0..trim);
+        }
+    }
+
+    /// Inserts keyframe and maintains landmark-to-track mapping for PnP tracking
+    fn try_insert_keyframe_with_landmarks(
         &mut self,
         prev_pose: &TransformSE3,
         descriptor_info: DescriptorInfo,
@@ -672,11 +944,14 @@ impl ProcessingEngine {
         let track_lookup: Vec<usize> = matches_indexed.iter().map(|(idx, _)| *idx).collect();
 
         let mut features = Vec::new();
+        let mut track_to_match: HashMap<usize, usize> = HashMap::new();
+
         for (match_idx, landmark) in &two_view.landmarks {
             if let Some(track_idx) = track_lookup.get(*match_idx) {
                 if let Some(normalized) = normalized_lookup.get(track_idx) {
                     let world_point = prev_pose.transform_point(landmark);
                     features.push((*normalized, world_point));
+                    track_to_match.insert(*track_idx, *match_idx);
                 }
             }
         }
@@ -690,12 +965,31 @@ impl ProcessingEngine {
             return;
         }
 
-        if let Some(id) = self
-            .map
-            .insert_keyframe(prev_pose.clone(), descriptor, features)
+        // Get the starting landmark ID before insertion
+        let starting_landmark_id = self.map.landmark_count() as u64;
+
+        if let Some(_keyframe_id) =
+            self.map
+                .insert_keyframe(prev_pose.clone(), descriptor, features.clone())
         {
-            info!("Committed keyframe {}", id);
-            self.last_keyframe_id = Some(id);
+            info!(
+                "Committed keyframe {} with {} landmarks",
+                _keyframe_id,
+                features.len()
+            );
+            self.last_keyframe_id = Some(_keyframe_id);
+
+            // Update landmark tracking: map track indices to landmark IDs
+            self.tracked_landmark_ids.clear();
+            for (feature_idx, (track_idx, _match_idx)) in track_to_match.iter().enumerate() {
+                let landmark_id = starting_landmark_id + feature_idx as u64;
+                self.tracked_landmark_ids.insert(*track_idx, landmark_id);
+            }
+
+            debug!(
+                "Initialized {} tracked landmarks for PnP",
+                self.tracked_landmark_ids.len()
+            );
         }
     }
 
@@ -852,6 +1146,45 @@ fn update_pose(current: &TransformSE3, two_view: &TwoViewInitialization) -> Tran
     let translation = Translation3::from(two_view.translation);
     let delta = TransformSE3::from_parts(translation, rotation);
     current * delta
+}
+
+/// Aligns the world coordinate frame so that the Y-axis points up (opposite to gravity).
+/// Returns a transform that rotates the camera frame to align with gravity.
+fn align_world_to_gravity(gravity: &GravityEstimate) -> TransformSE3 {
+    use nalgebra::Rotation3;
+
+    // Gravity direction in device frame (down)
+    let g_device = gravity.down().into_inner();
+
+    // We want world Y-axis to point up (opposite to gravity)
+    let world_up = Vector3::new(0.0, 1.0, 0.0);
+
+    // Compute rotation axis: cross product of gravity (down) and world up
+    let axis = g_device.cross(&-world_up);
+    let axis_norm = axis.norm();
+
+    // If gravity is already aligned (or anti-aligned) with Y, return identity or 180° flip
+    if axis_norm < 1e-6 {
+        let dot = g_device.dot(&-world_up);
+        if dot > 0.0 {
+            // Gravity points down, world Y points up: already aligned
+            return TransformSE3::identity();
+        } else {
+            // Gravity points up: rotate 180° around X
+            let rotation = Rotation3::from_axis_angle(&Vector3::x_axis(), std::f64::consts::PI);
+            return TransformSE3::from_parts(Translation3::identity(), rotation.into());
+        }
+    }
+
+    // Rotation angle: angle between gravity and -world_up
+    let angle = g_device.angle(&-world_up);
+    let axis_normalized = axis / axis_norm;
+
+    // Build rotation
+    let rotation =
+        Rotation3::from_axis_angle(&nalgebra::Unit::new_unchecked(axis_normalized), angle);
+
+    TransformSE3::from_parts(Translation3::identity(), rotation.into())
 }
 
 impl Default for ProcessingEngine {

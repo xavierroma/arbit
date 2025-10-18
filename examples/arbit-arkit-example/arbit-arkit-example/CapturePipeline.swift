@@ -48,6 +48,7 @@ final class CameraCaptureManager: NSObject, ObservableObject {
     @Published private(set) var imu: ImuState?
     @Published private(set) var mapStats: MapStats = MapStats(keyframes: 0, landmarks: 0, anchors: 0)
     @Published private(set) var anchorPoses: [UInt64: simd_double4x4] = [:]
+    @Published private(set) var visibleAnchors: [ProjectedAnchor] = []
     @Published private(set) var relocalizationSummary: RelocalizationSummary?
     @Published private(set) var lastPoseMatrix: simd_double4x4?
     @Published private(set) var mapStatusMessage: String?
@@ -122,6 +123,25 @@ final class CameraCaptureManager: NSObject, ObservableObject {
             self?.logger.info(
                 "Placed anchor at [\(translation.x, format: .fixed(precision: 2)), \(translation.y, format: .fixed(precision: 2)), \(translation.z, format: .fixed(precision:2))]"
             )
+        }
+    }
+    
+    func placeAnchorAtScreenPoint(normalizedU: Double, normalizedV: Double, depth: Double = 1.0) {
+        guard let context else { return }
+        
+        sampleQueue.async { [weak self] in
+            guard let self = self else { return }
+            
+            // Let the engine compute the ray and world position using its authoritative state
+            if let anchorId = context.placeAnchorAtScreenPoint(
+                normalizedU: normalizedU,
+                normalizedV: normalizedV,
+                depth: depth
+            ) {
+                self.logger.info("Placed anchor #\(anchorId) at screen (\(normalizedU, format: .fixed(precision: 3)), \(normalizedV, format: .fixed(precision: 3))) depth \(depth, format: .fixed(precision: 2))m")
+            } else {
+                self.logger.warning("Failed to place anchor - engine may not be initialized")
+            }
         }
     }
 
@@ -539,6 +559,7 @@ extension CameraCaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         }
         let relocalization = frameState?.relocalization
         let latestPoseMatrix = trajectory.last.map { self.poseMatrix(from: $0) }
+        let projectedAnchors = context.getVisibleAnchors(maxCount: 32)
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -552,6 +573,7 @@ extension CameraCaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate {
                                      landmarks: frameState?.landmarkCount ?? 0,
                                      anchors: frameState?.anchorCount ?? 0)
             self.anchorPoses = anchorDictionary
+            self.visibleAnchors = projectedAnchors
             self.relocalizationSummary = relocalization
             self.lastPoseMatrix = latestPoseMatrix
         }

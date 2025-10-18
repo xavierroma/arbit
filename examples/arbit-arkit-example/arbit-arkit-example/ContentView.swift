@@ -74,6 +74,16 @@ struct ContentView: View {
                 )
                 .allowsHitTesting(false)
             }
+            
+            if selectedMilestone == .m8 {
+                MilestoneEightTouchOverlay(cameraManager: cameraManager)
+                
+                MilestoneEightCubesOverlay(
+                    visibleAnchors: cameraManager.visibleAnchors,
+                    intrinsics: cameraManager.lastSample?.intrinsics
+                )
+                .allowsHitTesting(false)
+            }
 
             VStack {
                 HStack(alignment: .top) {
@@ -140,8 +150,8 @@ struct ContentView: View {
             MilestoneEightPanel(
                 stats: cameraManager.mapStats,
                 anchors: cameraManager.anchorPoses,
+                visibleAnchors: cameraManager.visibleAnchors,
                 lastPose: cameraManager.lastPoseMatrix,
-                placeAnchor: cameraManager.placeAnchor,
                 statusMessage: cameraManager.mapStatusMessage,
                 saveMap: cameraManager.saveMapSnapshot,
                 loadMap: cameraManager.loadSavedMap
@@ -609,8 +619,8 @@ private struct MilestoneSevenPanel: View {
 private struct MilestoneEightPanel: View {
     let stats: MapStats
     let anchors: [UInt64: simd_double4x4]
+    let visibleAnchors: [ProjectedAnchor]
     let lastPose: simd_double4x4?
-    let placeAnchor: () -> Void
     let statusMessage: String?
     let saveMap: () -> Void
     let loadMap: () -> Void
@@ -621,27 +631,22 @@ private struct MilestoneEightPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Milestone 8 — Anchors")
+            Text("Milestone 8 — AR Anchors")
                 .font(.headline)
-            Text("Anchors: \(stats.anchors) · Keyframes: \(stats.keyframes)")
+            Text("Total: \(stats.anchors) · Visible: \(visibleAnchors.count) · KFs: \(stats.keyframes)")
 
             if let lastPose {
                 let translation = translationVector(from: lastPose)
-                Text(String(format: "Last Pose: [%.2f, %.2f, %.2f]", translation.x, translation.y, translation.z))
+                Text(String(format: "Camera: [%.2f, %.2f, %.2f]", translation.x, translation.y, translation.z))
             } else {
-                Text("Last Pose: pending…")
+                Text("Camera pose: pending…")
             }
 
-            HStack(spacing: 8) {
-                Button(action: placeAnchor) {
-                    Text("Place Anchor")
-                        .font(.system(.footnote, design: .monospaced).bold())
-                        .padding(.vertical, 6)
-                        .padding(.horizontal, 16)
-                        .background(Color.blue.opacity(0.75), in: Capsule())
-                        .foregroundStyle(.white)
-                }
+            Text("Tap to place anchors at 1m depth")
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.cyan)
 
+            HStack(spacing: 8) {
                 Button(action: saveMap) {
                     Text("Save Map")
                         .font(.system(.footnote, design: .monospaced))
@@ -661,17 +666,19 @@ private struct MilestoneEightPanel: View {
                 }
             }
 
-            if sortedAnchors.isEmpty {
-                Text("No anchors recorded yet.")
-                    .font(.system(.footnote, design: .monospaced))
-            } else {
+            if !visibleAnchors.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
-                    ForEach(sortedAnchors, id: \.0) { entry in
-                        let translation = translationVector(from: entry.1)
-                        Text(String(format: "#%llu → [%.2f, %.2f, %.2f]", entry.0, translation.x, translation.y, translation.z))
+                    Text("Visible Anchors:")
+                        .font(.system(.caption, design: .monospaced))
+                    ForEach(visibleAnchors.prefix(5), id: \.anchorId) { anchor in
+                        Text(String(format: "#%llu @ (%.0f, %.0f) %.2fm", 
+                                  anchor.anchorId, 
+                                  anchor.pixelX, 
+                                  anchor.pixelY,
+                                  anchor.depth))
                     }
                 }
-                .font(.system(.footnote, design: .monospaced))
+                .font(.system(.caption2, design: .monospaced))
             }
 
             if let statusMessage {
@@ -833,6 +840,139 @@ private struct TrackedPointsOverlay: View {
                 }
             }
         }
+    }
+}
+
+private struct MilestoneEightTouchOverlay: View {
+    @ObservedObject var cameraManager: CameraCaptureManager
+    
+    var body: some View {
+        GeometryReader { geo in
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture { location in
+                    placeAnchorAtTap(location: location, size: geo.size)
+                }
+        }
+    }
+    
+    private func placeAnchorAtTap(location: CGPoint, size: CGSize) {
+        guard size.width > 0, size.height > 0 else {
+            return
+        }
+        
+        // Convert tap location to normalized screen coordinates [0, 1]
+        let normalizedU = Double(location.x / size.width)
+        let normalizedV = Double(location.y / size.height)
+        
+        // Let the engine handle ray computation and world transformation
+        cameraManager.placeAnchorAtScreenPoint(
+            normalizedU: normalizedU,
+            normalizedV: normalizedV,
+            depth: 1.0
+        )
+    }
+}
+
+private struct MilestoneEightCubesOverlay: View {
+    let visibleAnchors: [ProjectedAnchor]
+    let intrinsics: IntrinsicsSummary?
+    
+    var body: some View {
+        GeometryReader { geo in
+            let width = CGFloat(intrinsics?.width ?? 0)
+            let height = CGFloat(intrinsics?.height ?? 0)
+            
+            if width <= 0 || height <= 0 {
+                Color.clear
+            } else {
+                Canvas { context, size in
+                    for anchor in visibleAnchors {
+                        // Convert pixel coordinates to screen coordinates
+                        let u = CGFloat(anchor.pixelX) / width
+                        let v = CGFloat(anchor.pixelY) / height
+                        let x = u * size.width
+                        let y = v * size.height
+                        
+                        // Calculate cube size based on depth (perspective)
+                        let baseSize: CGFloat = 60.0
+                        let perspectiveSize = baseSize / CGFloat(max(anchor.depth, 0.5))
+                        let cubeSize = min(perspectiveSize, baseSize)
+                        
+                        // Draw cube wireframe
+                        drawCube(context: &context, center: CGPoint(x: x, y: y), size: cubeSize)
+                        
+                        // Draw anchor ID label
+                        let idText = Text("#\(anchor.anchorId)")
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.white)
+                        
+                        context.draw(idText, at: CGPoint(x: x, y: y - cubeSize / 2 - 12))
+                    }
+                }
+            }
+        }
+    }
+    
+    private func drawCube(context: inout GraphicsContext, center: CGPoint, size: CGFloat) {
+        let halfSize = size / 2.0
+        let offset3D: CGFloat = size * 0.3 // Pseudo-3D offset
+        
+        // Back face (smaller, offset)
+        let backRect = CGRect(
+            x: center.x - halfSize * 0.7 + offset3D,
+            y: center.y - halfSize * 0.7 - offset3D,
+            width: size * 0.7,
+            height: size * 0.7
+        )
+        
+        // Front face
+        let frontRect = CGRect(
+            x: center.x - halfSize,
+            y: center.y - halfSize,
+            width: size,
+            height: size
+        )
+        
+        // Draw back face
+        context.stroke(
+            Path(roundedRect: backRect, cornerRadius: 4),
+            with: .color(.cyan.opacity(0.5)),
+            lineWidth: 2.0
+        )
+        
+        // Draw front face
+        context.stroke(
+            Path(roundedRect: frontRect, cornerRadius: 4),
+            with: .color(.cyan),
+            lineWidth: 3.0
+        )
+        
+        // Connect corners
+        var connectingLines = Path()
+        // Top-left
+        connectingLines.move(to: CGPoint(x: frontRect.minX, y: frontRect.minY))
+        connectingLines.addLine(to: CGPoint(x: backRect.minX, y: backRect.minY))
+        // Top-right
+        connectingLines.move(to: CGPoint(x: frontRect.maxX, y: frontRect.minY))
+        connectingLines.addLine(to: CGPoint(x: backRect.maxX, y: backRect.minY))
+        // Bottom-left
+        connectingLines.move(to: CGPoint(x: frontRect.minX, y: frontRect.maxY))
+        connectingLines.addLine(to: CGPoint(x: backRect.minX, y: backRect.maxY))
+        // Bottom-right
+        connectingLines.move(to: CGPoint(x: frontRect.maxX, y: frontRect.maxY))
+        connectingLines.addLine(to: CGPoint(x: backRect.maxX, y: backRect.maxY))
+        
+        context.stroke(connectingLines, with: .color(.cyan.opacity(0.7)), lineWidth: 2.0)
+        
+        // Add a pulsing center dot
+        let centerDot = Path(ellipseIn: CGRect(
+            x: center.x - 3,
+            y: center.y - 3,
+            width: 6,
+            height: 6
+        ))
+        context.fill(centerDot, with: .color(.yellow))
     }
 }
 
