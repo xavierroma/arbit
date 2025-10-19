@@ -33,6 +33,7 @@ use nalgebra::{Matrix3x4, Point3, Translation3, UnitQuaternion, Vector2, Vector3
 /// Processing constants grouped into a configuration structure.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
+    pub pyramid_octaves: usize,
     pub baseline_scale: f64,
     pub max_trajectory_points: usize,
     pub min_keyframe_landmarks: usize,
@@ -46,6 +47,7 @@ pub struct EngineConfig {
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
+            pyramid_octaves: 3,
             baseline_scale: 0.05,
             max_trajectory_points: 2048,
             min_keyframe_landmarks: 12,
@@ -804,7 +806,7 @@ impl ProcessingEngine {
     /// Step 3: Build image pyramid for multi-scale feature tracking.
     fn step_build_pyramid(&mut self, image: ImageBuffer) -> Pyramid {
         let pyramid_start = Instant::now();
-        let pyramid = build_pyramid(&image, 3);
+        let pyramid = build_pyramid(&image, self.config.pyramid_octaves);
         let levels = pyramid.levels().len();
         let pyramid_elapsed = pyramid_start.elapsed().as_secs_f64() * 1000.0;
 

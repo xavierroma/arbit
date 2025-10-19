@@ -174,11 +174,6 @@ impl Tracker {
             outcome: TrackOutcome::Converged,
         };
 
-        debug!(
-            "Tracking completed: {:?} -> {:?} ({} iterations, residual: {:.4})",
-            initial_position, result.refined, total_iterations, residual
-        );
-
         result
     }
 

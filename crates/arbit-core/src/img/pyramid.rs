@@ -1,8 +1,11 @@
 use log::{debug, trace};
+use rayon::prelude::*;
 use std::ops::{Index, IndexMut};
 
-const GAUSS_KERNEL: [f32; 5] = [1.0, 4.0, 6.0, 4.0, 1.0];
-const GAUSS_KERNEL_SUM: f32 = 16.0; // Sum of GAUSS_KERNEL
+// 3-tap Gaussian kernel for performance (approximates 5-tap well enough for SLAM)
+const GAUSS_KERNEL: [f32; 3] = [1.0, 2.0, 1.0];
+const GAUSS_KERNEL_SUM: f32 = 4.0; // Sum of GAUSS_KERNEL
+const KERNEL_RADIUS: isize = 1; // (kernel_size - 1) / 2
 
 /// Simple single-channel image buffer backed by contiguous `f32` pixels.
 #[derive(Debug, Clone, PartialEq)]
@@ -198,34 +201,48 @@ pub fn build_pyramid(base: &ImageBuffer, octaves: usize) -> Pyramid {
 }
 
 fn gaussian_blur(src: &ImageBuffer) -> ImageBuffer {
-    let mut tmp = ImageBuffer::zeros(src.width(), src.height());
-    let mut dst = ImageBuffer::zeros(src.width(), src.height());
+    let width = src.width();
+    let height = src.height();
+    let total_pixels = width * height;
+    let src_data = src.data();
 
     // Horizontal pass
-    for y in 0..src.height() {
-        for x in 0..src.width() {
-            let mut accum = 0.0;
-            for (k, weight) in GAUSS_KERNEL.iter().enumerate() {
-                let sample_x = x as isize + k as isize - 2;
-                accum += weight * src.sample_clamped(sample_x, y as isize);
+    let mut tmp_data = vec![0.0f32; total_pixels];
+    tmp_data
+        .par_chunks_mut(width)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for x in 0..width {
+                let mut accum = 0.0;
+                // 3-tap kernel with manual bounds clamping
+                for k in 0..3 {
+                    let sample_x = (x as isize + k as isize - KERNEL_RADIUS)
+                        .clamp(0, width as isize - 1) as usize;
+                    accum += GAUSS_KERNEL[k] * src_data[y * width + sample_x];
+                }
+                row[x] = accum / GAUSS_KERNEL_SUM;
             }
-            tmp.set(x, y, accum / GAUSS_KERNEL_SUM);
-        }
-    }
+        });
 
     // Vertical pass
-    for y in 0..src.height() {
-        for x in 0..src.width() {
-            let mut accum = 0.0;
-            for (k, weight) in GAUSS_KERNEL.iter().enumerate() {
-                let sample_y = y as isize + k as isize - 2;
-                accum += weight * tmp.sample_clamped(x as isize, sample_y);
+    let mut dst_data = vec![0.0f32; total_pixels];
+    dst_data
+        .par_chunks_mut(width)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for x in 0..width {
+                let mut accum = 0.0;
+                // 3-tap kernel with manual bounds clamping
+                for k in 0..3 {
+                    let sample_y = (y as isize + k as isize - KERNEL_RADIUS)
+                        .clamp(0, height as isize - 1) as usize;
+                    accum += GAUSS_KERNEL[k] * tmp_data[sample_y * width + x];
+                }
+                row[x] = accum / GAUSS_KERNEL_SUM;
             }
-            dst.set(x, y, accum / GAUSS_KERNEL_SUM);
-        }
-    }
+        });
 
-    dst
+    ImageBuffer::new(width, height, dst_data)
 }
 
 fn downsample(src: &ImageBuffer) -> ImageBuffer {
@@ -251,28 +268,46 @@ fn downsample(src: &ImageBuffer) -> ImageBuffer {
 }
 
 fn sobel_gradients(src: &ImageBuffer) -> (ImageBuffer, ImageBuffer) {
-    let mut gx = ImageBuffer::zeros(src.width(), src.height());
-    let mut gy = ImageBuffer::zeros(src.width(), src.height());
+    let width = src.width();
+    let height = src.height();
+    let total_pixels = width * height;
+    let src_data = src.data();
 
     let kernel_x = [[-1.0f32, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]];
     let kernel_y = [[-1.0f32, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]];
 
-    for y in 0..src.height() {
-        for x in 0..src.width() {
-            let mut acc_x = 0.0;
-            let mut acc_y = 0.0;
-            for ky in 0..3 {
-                for kx in 0..3 {
-                    let sample = src
-                        .sample_clamped(x as isize + kx as isize - 1, y as isize + ky as isize - 1);
-                    acc_x += kernel_x[ky][kx] * sample;
-                    acc_y += kernel_y[ky][kx] * sample;
+    // Pre-allocate buffers
+    let mut gx_data = vec![0.0f32; total_pixels];
+    let mut gy_data = vec![0.0f32; total_pixels];
+
+    // Process in parallel with direct slice access
+    gx_data
+        .par_chunks_mut(width)
+        .zip(gy_data.par_chunks_mut(width))
+        .enumerate()
+        .for_each(|(y, (row_gx, row_gy))| {
+            for x in 0..width {
+                let mut acc_x = 0.0;
+                let mut acc_y = 0.0;
+                // 3x3 Sobel kernel with direct slice access
+                for ky in 0..3 {
+                    let sample_y =
+                        (y as isize + ky as isize - 1).clamp(0, height as isize - 1) as usize;
+                    for kx in 0..3 {
+                        let sample_x =
+                            (x as isize + kx as isize - 1).clamp(0, width as isize - 1) as usize;
+                        let sample = src_data[sample_y * width + sample_x];
+                        acc_x += kernel_x[ky][kx] * sample;
+                        acc_y += kernel_y[ky][kx] * sample;
+                    }
                 }
+                row_gx[x] = acc_x * 0.25; // Normalise sobel magnitude
+                row_gy[x] = acc_y * 0.25;
             }
-            gx.set(x, y, acc_x * 0.25); // Normalise sobel magnitude to keep scale manageable
-            gy.set(x, y, acc_y * 0.25);
-        }
-    }
+        });
+
+    let gx = ImageBuffer::new(width, height, gx_data);
+    let gy = ImageBuffer::new(width, height, gy_data);
 
     (gx, gy)
 }

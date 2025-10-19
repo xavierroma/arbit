@@ -1,6 +1,7 @@
 use crate::img::pyramid::PyramidLevel;
 use log::{debug, trace};
 use nalgebra::Vector2;
+use rayon::prelude::*;
 
 #[derive(Debug, Clone, Copy)]
 pub struct FeatureSeed {
@@ -37,11 +38,19 @@ impl FeatureSeeder {
 
     /// Computes Shi-Tomasi corner response (minimum eigenvalue of structure tensor)
     ///
-    /// For structure tensor M = [∑Iₓ²    ∑IₓIᵧ]
-    ///                           [∑IₓIᵧ   ∑Iᵧ² ]
-    /// where the sum is over a window around (x, y)
+    /// The structure tensor captures the distribution of gradient directions in a local window:
     ///
-    /// λ_min = (trace - √(trace² - 4·det)) / 2
+    /// ```text
+    /// M = [ixx  ixy]   where  ixx = ∑Iₓ²,  iyy = ∑Iᵧ²,  ixy = ∑IₓIᵧ
+    ///     [ixy  iyy]
+    /// ```
+    ///
+    /// The minimum eigenvalue λ_min = (trace - √(trace² - 4·det)) / 2 indicates:
+    /// - **High λ_min**: Strong gradients in all directions → **Corner** 🎯
+    /// - **Low λ_min**: Weak gradient in at least one direction → Edge or flat region
+    ///
+    /// This makes λ_min an excellent corner detector: corners have strong responses
+    /// in multiple directions, while edges are strong in only one direction.
     #[inline]
     fn shi_tomasi_response(
         level: &PyramidLevel,
@@ -50,49 +59,56 @@ impl FeatureSeeder {
         width: usize,
         height: usize,
     ) -> f32 {
-        const WINDOW_SIZE: usize = 3; // 3x3 window
-        const HALF_WINDOW: i32 = (WINDOW_SIZE / 2) as i32;
-
-        let mut ixx = 0.0f32;
-        let mut iyy = 0.0f32;
-        let mut ixy = 0.0f32;
-
-        // Sum structure tensor elements over window
-        for dy in -HALF_WINDOW..=HALF_WINDOW {
-            for dx in -HALF_WINDOW..=HALF_WINDOW {
-                let nx = x as i32 + dx;
-                let ny = y as i32 + dy;
-
-                // Bounds check
-                if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 {
-                    continue;
-                }
-
-                let gx = level.grad_x.get(nx as usize, ny as usize);
-                let gy = level.grad_y.get(nx as usize, ny as usize);
-
-                ixx += gx * gx;
-                iyy += gy * gy;
-                ixy += gx * gy;
-            }
+        // Early bounds check - if we can't fit a 3x3 window, return 0
+        if x < 1 || y < 1 || x >= width - 1 || y >= height - 1 {
+            return 0.0;
         }
+
+        let gx_values: [f32; 9] = [
+            level.grad_x.get(x - 1, y - 1),
+            level.grad_x.get(x, y - 1),
+            level.grad_x.get(x + 1, y - 1),
+            level.grad_x.get(x - 1, y),
+            level.grad_x.get(x, y),
+            level.grad_x.get(x + 1, y),
+            level.grad_x.get(x - 1, y + 1),
+            level.grad_x.get(x, y + 1),
+            level.grad_x.get(x + 1, y + 1),
+        ];
+
+        let gy_values: [f32; 9] = [
+            level.grad_y.get(x - 1, y - 1),
+            level.grad_y.get(x, y - 1),
+            level.grad_y.get(x + 1, y - 1),
+            level.grad_y.get(x - 1, y),
+            level.grad_y.get(x, y),
+            level.grad_y.get(x + 1, y),
+            level.grad_y.get(x - 1, y + 1),
+            level.grad_y.get(x, y + 1),
+            level.grad_y.get(x + 1, y + 1),
+        ];
+
+        // Iterator pattern that LLVM auto-unrolls and vectorizes
+        let (ixx, iyy, ixy) = gx_values
+            .iter()
+            .zip(gy_values.iter())
+            .fold((0.0f32, 0.0f32, 0.0f32), |(ixx, iyy, ixy), (&gx, &gy)| {
+                (ixx + gx * gx, iyy + gy * gy, ixy + gx * gy)
+            });
 
         let trace = ixx + iyy;
         let det = ixx * iyy - ixy * ixy;
-
-        // Discriminant check to avoid numerical issues
         let discriminant = trace * trace - 4.0 * det;
+
         if discriminant < 0.0 {
             return 0.0;
         }
 
-        // Minimum eigenvalue
         0.5 * (trace - discriminant.sqrt())
     }
 
     pub fn seed(&self, level: &PyramidLevel) -> Vec<FeatureSeed> {
         let cell = self.config.cell_size.max(4);
-        let mut seeds = Vec::new();
         let width = level.image.width();
         let height = level.image.height();
 
@@ -105,37 +121,41 @@ impl FeatureSeeder {
         let cells_y = height.div_ceil(cell);
         trace!("Processing {cells_x}x{cells_y} cells");
 
-        for cy in 0..cells_y {
-            let y_min = cy * cell;
-            let y_max = ((cy + 1) * cell).min(height);
-            for cx in 0..cells_x {
-                let x_min = cx * cell;
-                let x_max = ((cx + 1) * cell).min(width);
+        let mut seeds: Vec<FeatureSeed> = (0..cells_y)
+            .into_par_iter()
+            .flat_map(|cy| {
+                let y_min = cy * cell;
+                let y_max = ((cy + 1) * cell).min(height);
+                (0..cells_x).into_par_iter().filter_map(move |cx| {
+                    let x_min = cx * cell;
+                    let x_max = ((cx + 1) * cell).min(width);
+                    let mut best_score = 0.0f32;
+                    let mut best_position = None;
 
-                let mut best_score = 0.0f32;
-                let mut best_position = None;
-
-                for y in y_min..y_max {
-                    for x in x_min..x_max {
-                        let score = Self::shi_tomasi_response(level, x, y, width, height);
-                        if score > best_score {
-                            best_score = score;
-                            best_position = Some(Vector2::new(x as f32 + 0.5, y as f32 + 0.5));
+                    for y in y_min..y_max {
+                        for x in x_min..x_max {
+                            let score = Self::shi_tomasi_response(level, x, y, width, height);
+                            if score > best_score {
+                                best_score = score;
+                                best_position = Some(Vector2::new(x as f32 + 0.5, y as f32 + 0.5));
+                            }
                         }
                     }
-                }
 
-                if let Some(position) = best_position
-                    && best_score >= self.config.response_threshold
-                {
-                    seeds.push(FeatureSeed {
-                        level: level.octave,
-                        position,
-                        score: best_score,
-                    });
-                }
-            }
-        }
+                    if let Some(position) = best_position
+                        && best_score >= self.config.response_threshold
+                    {
+                        Some(FeatureSeed {
+                            level: level.octave,
+                            position,
+                            score: best_score,
+                        })
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
 
         seeds.sort_by(|a, b| {
             b.score
