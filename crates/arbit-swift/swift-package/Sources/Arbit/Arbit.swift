@@ -235,6 +235,19 @@ private func ffi_get_visible_anchors(
     _ maxAnchors: Int
 ) -> Int
 
+@_silgen_name("arbit_get_visible_landmarks")
+private func ffi_get_visible_landmarks(
+    _ handle: OpaquePointer?,
+    _ outLandmarks: UnsafeMutablePointer<ArbitFFI.ArbitProjectedLandmark>?,
+    _ maxLandmarks: Int
+) -> Int
+
+@_silgen_name("arbit_get_map_debug_snapshot")
+private func ffi_get_map_debug_snapshot(
+    _ handle: OpaquePointer?,
+    _ outSnapshot: UnsafeMutablePointer<ArbitFFI.ArbitMapDebugSnapshot>?
+) -> Bool
+
 @_silgen_name("arbit_save_map")
 private func ffi_save_map(
     _ handle: OpaquePointer?,
@@ -561,6 +574,51 @@ public struct ProjectedAnchor: Sendable {
     }
 }
 
+/// A landmark projected into screen space for debugging
+public struct ProjectedLandmark: Sendable {
+    public let landmarkId: UInt64
+    public let worldPosition: SIMD3<Double>
+    public let normalizedU: Double
+    public let normalizedV: Double
+    public let pixelX: Float
+    public let pixelY: Float
+    public let depth: Double
+    
+    init(ffiValue: ArbitFFI.ArbitProjectedLandmark) {
+        landmarkId = ffiValue.landmark_id
+        worldPosition = SIMD3(ffiValue.world_x, ffiValue.world_y, ffiValue.world_z)
+        normalizedU = ffiValue.normalized_u
+        normalizedV = ffiValue.normalized_v
+        pixelX = ffiValue.pixel_x
+        pixelY = ffiValue.pixel_y
+        depth = ffiValue.depth
+    }
+}
+
+/// Debug snapshot of the map state
+public struct MapDebugSnapshot: Sendable {
+    public let cameraPosition: SIMD3<Double>
+    public let cameraRotation: simd_double3x3
+    public let landmarkCount: UInt64
+    public let keyframeCount: UInt64
+    public let anchorCount: UInt64
+    
+    init(ffiValue: ArbitFFI.ArbitMapDebugSnapshot) {
+        cameraPosition = SIMD3(ffiValue.camera_x, ffiValue.camera_y, ffiValue.camera_z)
+        
+        let r = ffiValue.camera_rotation
+        cameraRotation = simd_double3x3(
+            SIMD3(r.0, r.1, r.2),
+            SIMD3(r.3, r.4, r.5),
+            SIMD3(r.6, r.7, r.8)
+        )
+        
+        landmarkCount = ffiValue.landmark_count
+        keyframeCount = ffiValue.keyframe_count
+        anchorCount = ffiValue.anchor_count
+    }
+}
+
 public struct RelocalizationSummary: Sendable {
     public var pose: simd_double4x4
     public var inliers: UInt32
@@ -845,6 +903,28 @@ public final class ArbitCaptureContext: @unchecked Sendable {
         )
         let written = ffi_get_visible_anchors(handle, &buffer, maxCount)
         return buffer.prefix(written).map { ProjectedAnchor(ffiValue: $0) }
+    }
+    
+    /// Get all visible landmarks in the current camera frame (for debugging visualization)
+    /// - Parameter maxCount: Maximum number of landmarks to return (default: 200)
+    /// - Returns: Array of projected landmarks with 3D world positions and screen coordinates
+    public func getVisibleLandmarks(maxCount: Int = 200) -> [ProjectedLandmark] {
+        var buffer = [ArbitFFI.ArbitProjectedLandmark](
+            repeating: ArbitFFI.ArbitProjectedLandmark(),
+            count: maxCount
+        )
+        let written = ffi_get_visible_landmarks(handle, &buffer, maxCount)
+        return buffer.prefix(written).map { ProjectedLandmark(ffiValue: $0) }
+    }
+    
+    /// Get a debug snapshot of the current map state
+    /// - Returns: Snapshot containing camera pose and map statistics
+    public func getMapDebugSnapshot() -> MapDebugSnapshot? {
+        var snapshot = ArbitFFI.ArbitMapDebugSnapshot()
+        if ffi_get_map_debug_snapshot(handle, &snapshot) {
+            return MapDebugSnapshot(ffiValue: snapshot)
+        }
+        return nil
     }
 
     public func saveMap() throws -> Data {

@@ -14,33 +14,27 @@ import simd
 import Arbit
 
 private enum Milestone: Int, CaseIterable, Identifiable {
-    case m1 = 1, m2, m3, m4, m5, m6, m7, m8
+    case pyramid = 1, tracking, twoView, vo, anchors
 
     var id: Int { rawValue }
 
     var label: String {
         switch self {
-        case .m1: "M1 Axes"
-        case .m2: "M2 Pyramid"
-        case .m3: "M3 Gravity"
-        case .m4: "M4 Tracker"
-        case .m5: "M5 Init"
-        case .m6: "M6 VO"
-        case .m7: "M7 Reloc"
-        case .m8: "M8 Anchors"
+        case .pyramid: "Pyramid"
+        case .tracking: "Tracker"
+        case .twoView: "Init"
+        case .vo: "VO"
+        case .anchors: "Anchors"
         }
     }
 
     var headline: String {
         switch self {
-        case .m1: "Milestone 1 — Timestamp HUD"
-        case .m2: "Milestone 2 — Pyramid & Back-Projection"
-        case .m3: "Milestone 3 — Gravity Arrow"
-        case .m4: "Milestone 4 — Point Tracker"
-        case .m5: "Milestone 5 — Two-View Init"
-        case .m6: "Milestone 6 — VO Loop"
-        case .m7: "Milestone 7 — Relocalization"
-        case .m8: "Milestone 8 — Anchors"
+        case .pyramid: "Pyramid"
+        case .tracking: "Tracker"
+        case .twoView: "Init"
+        case .vo: "VO"
+        case .anchors: "Anchors"
         }
     }
 }
@@ -49,7 +43,7 @@ struct ContentView: View {
     @StateObject private var cameraManager = CameraCaptureManager()
     @StateObject private var orientationProvider = DeviceOrientationProvider()
 
-    @State private var selectedMilestone: Milestone = .m1
+    @State private var selectedMilestone: Milestone = .pyramid
     @State private var previousPipelineSeconds: Double?
     @State private var estimatedFPS: Double?
     @State private var backProjection: BackProjectionResult?
@@ -63,11 +57,7 @@ struct ContentView: View {
                 PermissionOverlay()
             }
 
-            if selectedMilestone == .m2 {
-                MilestoneTwoTouchOverlay(cameraManager: cameraManager, result: $backProjection)
-            }
-
-            if selectedMilestone == .m4 {
+            if selectedMilestone == .tracking {
                 TrackedPointsOverlay(
                     trackedPoints: cameraManager.trackedPoints,
                     intrinsics: cameraManager.lastSample?.intrinsics
@@ -75,8 +65,14 @@ struct ContentView: View {
                 .allowsHitTesting(false)
             }
             
-            if selectedMilestone == .m8 {
+            if selectedMilestone == .anchors {
                 MilestoneEightTouchOverlay(cameraManager: cameraManager)
+                
+                MapLandmarksOverlay(
+                    landmarks: cameraManager.visibleLandmarks,
+                    intrinsics: cameraManager.lastSample?.intrinsics
+                )
+                .allowsHitTesting(false)
                 
                 MilestoneEightCubesOverlay(
                     visibleAnchors: cameraManager.visibleAnchors,
@@ -92,7 +88,6 @@ struct ContentView: View {
                         topLeftPanel
                     }
                     Spacer()
-                    topRightPanel
                 }
                 Spacer()
                 footerPanel
@@ -122,31 +117,19 @@ struct ContentView: View {
     @ViewBuilder
     private var topLeftPanel: some View {
         switch selectedMilestone {
-        case .m1:
-            MilestoneOnePanel(sample: cameraManager.lastSample, estimatedFPS: estimatedFPS)
-        case .m2:
+        case .pyramid:
             MilestoneTwoPanel(
                 sample: cameraManager.lastSample,
                 levels: cameraManager.pyramidLevels,
                 projection: backProjection
             )
-        case .m3:
-            MilestoneThreePanel(
-                orientation: orientationProvider.deviceToWorld,
-                gravityDown: cameraManager.imu?.gravityDown
-            )
-        case .m4:
+        case .tracking:
             MilestoneFourPanel(trackedPoints: cameraManager.trackedPoints)
-        case .m5:
+        case .twoView:
             MilestoneFivePanel(summary: cameraManager.twoViewSummary)
-        case .m6:
+        case .vo:
             MilestoneSixPanel(trajectory: cameraManager.trajectory)
-        case .m7:
-            MilestoneSevenPanel(
-                stats: cameraManager.mapStats,
-                summary: cameraManager.relocalizationSummary
-            )
-        case .m8:
+        case .anchors:
             MilestoneEightPanel(
                 stats: cameraManager.mapStats,
                 anchors: cameraManager.anchorPoses,
@@ -156,22 +139,6 @@ struct ContentView: View {
                 saveMap: cameraManager.saveMapSnapshot,
                 loadMap: cameraManager.loadSavedMap
             )
-        }
-    }
-
-    @ViewBuilder
-    private var topRightPanel: some View {
-        switch selectedMilestone {
-        case .m1:
-            AxesSceneView(orientation: orientationProvider.deviceToWorld)
-                .frame(width: 180, height: 180)
-                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
-        case .m3:
-            AxesSceneView(orientation: orientationProvider.deviceToWorld)
-                .frame(width: 160, height: 160)
-                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
-        default:
-            EmptyView()
         }
     }
 
@@ -239,38 +206,6 @@ private struct MilestoneSelector: View {
     }
 }
 
-private struct MilestoneOnePanel: View {
-    let sample: CapturedSample?
-    let estimatedFPS: Double?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Milestone 1 — Timestamp HUD")
-                .font(.headline)
-                .padding(.bottom, 4)
-
-            if let sample {
-                Text("Capture (s): \(formatDouble(sample.captureSeconds))")
-                Text("Pipeline (s): \(formatDouble(sample.pipelineSeconds))")
-                Text(String(format: "Latency (ms): %.2f", sample.latencySeconds * 1_000))
-                Text("Frame #: \(sample.frameIndex)")
-                if let fps = estimatedFPS {
-                    Text(String(format: "Approx FPS: %.1f", fps))
-                }
-                Text("Intrinsics fx/fy: \(formatDouble(sample.intrinsics.fx)), \(formatDouble(sample.intrinsics.fy))")
-                Text("Principal cx/cy: \(formatDouble(sample.intrinsics.cx)), \(formatDouble(sample.intrinsics.cy))")
-                Text("Resolution: \(sample.intrinsics.width) × \(sample.intrinsics.height)")
-            } else {
-                Text("Waiting for camera frames…")
-            }
-        }
-        .font(.system(.body, design: .monospaced))
-        .foregroundStyle(.white)
-        .padding()
-        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
-    }
-}
-
 private struct BackProjectionResult {
     let tapPoint: CGPoint
     let pixel: CGPoint
@@ -284,7 +219,7 @@ private struct MilestoneTwoPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Milestone 2 — Pyramid & Back-Projection")
+            Text("Pyramid")
                 .font(.headline)
 
             if levels.isEmpty {
@@ -313,9 +248,6 @@ private struct MilestoneTwoPanel: View {
                     Text(String(format: "Ray: [%.3f, %.3f, %.3f]", projection.ray.x, projection.ray.y, projection.ray.z))
                 }
                 .font(.system(.footnote, design: .monospaced))
-            } else {
-                Text("Tap the preview to inspect a ray.")
-                    .font(.system(.footnote, design: .monospaced))
             }
         }
         .foregroundStyle(.white)
@@ -365,127 +297,6 @@ private struct PyramidLevelThumbnail: View {
         }
     }
 }
-
-private struct MilestoneThreePanel: View {
-    let orientation: simd_quatf
-    let gravityDown: SIMD3<Double>?
-
-    private var deviceDown: simd_float3 {
-        if let gravityDown {
-            return simd_float3(
-                Float(gravityDown.x),
-                Float(gravityDown.y),
-                Float(gravityDown.z)
-            )
-        }
-        return orientation.inverse.act(simd_float3(0, -1, 0))
-    }
-
-    private var eulerAngles: (roll: Double, pitch: Double, yaw: Double) {
-        let q = orientation
-        let qw = Double(q.real)
-        let qx = Double(q.imag.x)
-        let qy = Double(q.imag.y)
-        let qz = Double(q.imag.z)
-
-        let sinr = 2.0 * (qw * qx + qy * qz)
-        let cosr = 1.0 - 2.0 * (qx * qx + qy * qy)
-        let roll = atan2(sinr, cosr)
-
-        let sinp = 2.0 * (qw * qy - qz * qx)
-        let pitch: Double
-        if abs(sinp) >= 1.0 {
-            pitch = copysign(Double.pi / 2.0, sinp)
-        } else {
-            pitch = asin(sinp)
-        }
-
-        let siny = 2.0 * (qw * qz + qx * qy)
-        let cosy = 1.0 - 2.0 * (qy * qy + qz * qz)
-        let yaw = atan2(siny, cosy)
-
-        return (roll, pitch, yaw)
-    }
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            GravityIndicatorView(downVector: deviceDown)
-                .frame(width: 140, height: 140)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Milestone 3 — Gravity Arrow")
-                    .font(.headline)
-                Text(String(format: "Down (device): [%.2f, %.2f, %.2f]", deviceDown.x, deviceDown.y, deviceDown.z))
-                let angles = eulerAngles
-                Text(String(format: "Roll: %.1f°", angles.roll * 180.0 / .pi))
-                Text(String(format: "Pitch: %.1f°", angles.pitch * 180.0 / .pi))
-                Text(String(format: "Yaw: %.1f°", angles.yaw * 180.0 / .pi))
-                if let gravityDown {
-                    Text("Samples: \(gravityDown.debugDescription)")
-                }
-            }
-            .font(.system(.footnote, design: .monospaced))
-        }
-        .foregroundStyle(.white)
-        .padding()
-        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
-    }
-}
-
-private struct GravityIndicatorView: View {
-    let downVector: simd_float3
-
-    var body: some View {
-        GeometryReader { geo in
-            let size = min(geo.size.width, geo.size.height)
-            let radius = size / 2.0 - 6.0
-            let center = CGPoint(x: geo.size.width / 2.0, y: geo.size.height / 2.0)
-            let dx = CGFloat(downVector.x)
-            let dy = CGFloat(downVector.y)
-            let length = max(sqrt(dx * dx + dy * dy), 0.001)
-            let direction = CGPoint(x: dx / length, y: dy / length)
-            let arrowEnd = CGPoint(
-                x: center.x + direction.x * radius,
-                y: center.y + direction.y * radius
-            )
-
-            ZStack {
-                Circle()
-                    .stroke(Color.white.opacity(0.7), lineWidth: 1.5)
-                    .frame(width: size - 8.0, height: size - 8.0)
-                    .position(center)
-
-                Path { path in
-                    path.move(to: center)
-                    path.addLine(to: arrowEnd)
-                }
-                .stroke(Color.yellow, style: StrokeStyle(lineWidth: 3.0, lineCap: .round))
-
-                ArrowHead()
-                    .fill(Color.yellow)
-                    .frame(width: 18, height: 18)
-                    .position(arrowEnd)
-
-                Circle()
-                    .fill(Color.white)
-                    .frame(width: 6, height: 6)
-                    .position(center)
-            }
-        }
-    }
-
-    private struct ArrowHead: Shape {
-        func path(in rect: CGRect) -> Path {
-            Path { path in
-                path.move(to: CGPoint(x: rect.midX, y: rect.minY))
-                path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
-                path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
-                path.closeSubpath()
-            }
-        }
-    }
-}
-
 private struct MilestoneFourPanel: View {
     let trackedPoints: [TrackedPoint]
 
@@ -509,7 +320,7 @@ private struct MilestoneFourPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Milestone 4 — PyrLK Tracker")
+            Text("Shi Tomasi")
                 .font(.headline)
             if trackedPoints.isEmpty {
                 Text("Waiting for feature seeds…")
@@ -531,7 +342,7 @@ private struct MilestoneFivePanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Milestone 5 — Two-View Init")
+            Text("Two-View Init")
                 .font(.headline)
             if let summary {
                 Text("Inliers: \(summary.inliers)")
@@ -572,7 +383,7 @@ private struct MilestoneSixPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Milestone 6 — VO Trajectory")
+            Text("VO Trajectory")
                 .font(.headline)
             if trajectory.count <= 1 {
                 Text("Waiting for pose estimates…")
@@ -582,31 +393,6 @@ private struct MilestoneSixPanel: View {
                 if let last = trajectory.last?.position {
                     Text(String(format: "Last Pose: [%.2f, %.2f, %.2f]", last.x, last.y, last.z))
                 }
-            }
-        }
-        .font(.system(.footnote, design: .monospaced))
-        .foregroundStyle(.white)
-        .padding()
-        .background(.black.opacity(0.58), in: RoundedRectangle(cornerRadius: 12))
-    }
-}
-
-private struct MilestoneSevenPanel: View {
-    let stats: MapStats
-    let summary: RelocalizationSummary?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Milestone 7 — Relocalization")
-                .font(.headline)
-            Text("Keyframes: \(stats.keyframes) · Landmarks: \(stats.landmarks)")
-            if let summary {
-                Text("Inliers: \(summary.inliers)")
-                Text(String(format: "Avg Error: %.4f", summary.averageError))
-                let translation = translationVector(from: summary.pose)
-                Text(String(format: "Recovered Pose: [%.2f, %.2f, %.2f]", translation.x, translation.y, translation.z))
-            } else {
-                Text("Waiting for relocalization attempt…")
             }
         }
         .font(.system(.footnote, design: .monospaced))
@@ -630,60 +416,70 @@ private struct MilestoneEightPanel: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Milestone 8 — AR Anchors")
+        VStack(alignment: .leading, spacing: 6) {
+            Text("AR Anchors")
                 .font(.headline)
-            Text("Total: \(stats.anchors) · Visible: \(visibleAnchors.count) · KFs: \(stats.keyframes)")
-
-            if let lastPose {
-                let translation = translationVector(from: lastPose)
-                Text(String(format: "Camera: [%.2f, %.2f, %.2f]", translation.x, translation.y, translation.z))
-            } else {
-                Text("Camera pose: pending…")
+            
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Map:")
+                    Text("  Landmarks: \(stats.landmarks)")
+                    Text("  Keyframes: \(stats.keyframes)")
+                    Text("  Anchors: \(stats.anchors)")
+                }
+                
+                if let lastPose {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Camera:")
+                        let trans = translationVector(from: lastPose)
+                        Text(String(format: "  X: %.2fm", trans.x))
+                        Text(String(format: "  Y: %.2fm", trans.y))
+                        Text(String(format: "  Z: %.2fm", trans.z))
+                    }
+                }
             }
+            .font(.system(.caption, design: .monospaced))
 
-            Text("Tap to place anchors at 1m depth")
+            Text("Tap screen to place anchors at 1m depth")
                 .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.cyan)
+            
+            Text("Green dots = map landmarks")
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(.green)
+            
+            Text("Cyan cubes = placed anchors")
+                .font(.system(.caption2, design: .monospaced))
                 .foregroundStyle(.cyan)
 
             HStack(spacing: 8) {
                 Button(action: saveMap) {
-                    Text("Save Map")
-                        .font(.system(.footnote, design: .monospaced))
-                        .padding(.vertical, 6)
-                        .padding(.horizontal, 16)
+                    Text("Save")
+                        .font(.system(.caption, design: .monospaced))
+                        .padding(.vertical, 4)
+                        .padding(.horizontal, 12)
                         .background(Color.green.opacity(0.7), in: Capsule())
                         .foregroundStyle(.white)
                 }
 
                 Button(action: loadMap) {
-                    Text("Load Map")
-                        .font(.system(.footnote, design: .monospaced))
-                        .padding(.vertical, 6)
-                        .padding(.horizontal, 16)
+                    Text("Load")
+                        .font(.system(.caption, design: .monospaced))
+                        .padding(.vertical, 4)
+                        .padding(.horizontal, 12)
                         .background(Color.orange.opacity(0.7), in: Capsule())
                         .foregroundStyle(.white)
                 }
             }
 
             if !visibleAnchors.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Visible Anchors:")
-                        .font(.system(.caption, design: .monospaced))
-                    ForEach(visibleAnchors.prefix(5), id: \.anchorId) { anchor in
-                        Text(String(format: "#%llu @ (%.0f, %.0f) %.2fm", 
-                                  anchor.anchorId, 
-                                  anchor.pixelX, 
-                                  anchor.pixelY,
-                                  anchor.depth))
-                    }
-                }
-                .font(.system(.caption2, design: .monospaced))
+                Text("Anchors visible: \(visibleAnchors.count)")
+                    .font(.system(.caption2, design: .monospaced))
             }
 
             if let statusMessage {
                 Text(statusMessage)
-                    .font(.system(.footnote, design: .monospaced))
+                    .font(.system(.caption2, design: .monospaced))
                     .foregroundStyle(.yellow)
             }
         }
@@ -693,71 +489,6 @@ private struct MilestoneEightPanel: View {
     }
 }
 
-private struct MilestoneTwoTouchOverlay: View {
-    @ObservedObject var cameraManager: CameraCaptureManager
-    @Binding var result: BackProjectionResult?
-
-    var body: some View {
-        GeometryReader { geo in
-            Color.clear
-                .contentShape(Rectangle())
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { value in
-                            updateResult(location: value.location, size: geo.size)
-                        }
-                        .onEnded { value in
-                            updateResult(location: value.location, size: geo.size)
-                        }
-                )
-                .overlay(alignment: .topLeading) {
-                    if let result {
-                        Crosshair()
-                            .stroke(Color.yellow, lineWidth: 1.5)
-                            .frame(width: 40, height: 40)
-                            .position(result.tapPoint)
-                    }
-                }
-        }
-    }
-
-    private func updateResult(location: CGPoint, size: CGSize) {
-        guard let sample = cameraManager.lastSample,
-              size.width > 0,
-              size.height > 0 else {
-            result = nil
-            return
-        }
-
-        let scaleX = Double(location.x / size.width)
-        let scaleY = Double(location.y / size.height)
-        let pixelX = scaleX * Double(sample.intrinsics.width)
-        let pixelY = scaleY * Double(sample.intrinsics.height)
-
-        let ndcX = (pixelX - sample.intrinsics.cx) / sample.intrinsics.fx
-        let ndcY = (pixelY - sample.intrinsics.cy) / sample.intrinsics.fy
-        let ray = simd_normalize(SIMD3<Double>(ndcX, ndcY, 1.0))
-
-        result = BackProjectionResult(
-            tapPoint: location,
-            pixel: CGPoint(x: pixelX, y: pixelY),
-            ray: ray
-        )
-    }
-
-    private struct Crosshair: Shape {
-        func path(in rect: CGRect) -> Path {
-            var path = Path()
-            let centerX = rect.midX
-            let centerY = rect.midY
-            path.move(to: CGPoint(x: centerX - rect.width / 2, y: centerY))
-            path.addLine(to: CGPoint(x: centerX + rect.width / 2, y: centerY))
-            path.move(to: CGPoint(x: centerX, y: centerY - rect.height / 2))
-            path.addLine(to: CGPoint(x: centerX, y: centerY + rect.height / 2))
-            return path
-        }
-    }
-}
 
 private struct TrackedPointsOverlay: View {
     let trackedPoints: [TrackedPoint]
@@ -773,14 +504,14 @@ private struct TrackedPointsOverlay: View {
                 Canvas { context, size in
                     for point in trackedPoints.prefix(200) where point.status == .converged {
                         // Convert initial position to screen coordinates
-                        let u0 = CGFloat(point.initial.x) / width
-                        let v0 = CGFloat(point.initial.y) / height
+                        let u0 = CGFloat(point.initial.x - 0.5) / width
+                        let v0 = CGFloat(point.initial.y - 0.5) / height
                         let x0 = u0 * size.width
                         let y0 = v0 * size.height
                         
                         // Convert refined position to screen coordinates
-                        let u1 = CGFloat(point.refined.x) / width
-                        let v1 = CGFloat(point.refined.y) / height
+                        let u1 = CGFloat(point.refined.x - 0.5) / width
+                        let v1 = CGFloat(point.refined.y - 0.5) / height
                         let x1 = u1 * size.width
                         let y1 = v1 * size.height
                         
@@ -973,6 +704,59 @@ private struct MilestoneEightCubesOverlay: View {
             height: 6
         ))
         context.fill(centerDot, with: .color(.yellow))
+    }
+}
+
+private struct MapLandmarksOverlay: View {
+    let landmarks: [ProjectedLandmark]
+    let intrinsics: IntrinsicsSummary?
+    
+    var body: some View {
+        GeometryReader { geo in
+            let width = CGFloat(intrinsics?.width ?? 0)
+            let height = CGFloat(intrinsics?.height ?? 0)
+            
+            if width <= 0 || height <= 0 {
+                Color.clear
+            } else {
+                Canvas { context, size in
+                    for landmark in landmarks {
+                        // Convert pixel to screen coordinates
+                        let u = CGFloat(landmark.pixelX) / width
+                        let v = CGFloat(landmark.pixelY) / height
+                        let x = u * size.width
+                        let y = v * size.height
+                        
+                        // Color based on depth
+                        let color: Color
+                        if landmark.depth < 1.0 {
+                            color = .yellow  // Very close
+                        } else if landmark.depth < 3.0 {
+                            color = .green   // Medium distance
+                        } else {
+                            color = .blue    // Far
+                        }
+                        
+                        // Draw small dot for each landmark
+                        let dotSize: CGFloat = 3.0
+                        let dot = Path(ellipseIn: CGRect(
+                            x: x - dotSize / 2,
+                            y: y - dotSize / 2,
+                            width: dotSize,
+                            height: dotSize
+                        ))
+                        context.fill(dot, with: .color(color.opacity(0.7)))
+                    }
+                    
+                    // Draw count in top-right
+                    let countText = Text("\(landmarks.count) landmarks")
+                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.green)
+                    
+                    context.draw(countText, at: CGPoint(x: size.width - 80, y: 20))
+                }
+            }
+        }
     }
 }
 

@@ -340,6 +340,62 @@ impl Default for ArbitProjectedAnchor {
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
+pub struct ArbitProjectedLandmark {
+    pub landmark_id: u64,
+    pub world_x: f64,
+    pub world_y: f64,
+    pub world_z: f64,
+    pub normalized_u: f64,
+    pub normalized_v: f64,
+    pub pixel_x: f32,
+    pub pixel_y: f32,
+    pub depth: f64,
+}
+
+impl Default for ArbitProjectedLandmark {
+    fn default() -> Self {
+        Self {
+            landmark_id: 0,
+            world_x: 0.0,
+            world_y: 0.0,
+            world_z: 0.0,
+            normalized_u: 0.0,
+            normalized_v: 0.0,
+            pixel_x: 0.0,
+            pixel_y: 0.0,
+            depth: 0.0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct ArbitMapDebugSnapshot {
+    pub camera_x: f64,
+    pub camera_y: f64,
+    pub camera_z: f64,
+    pub camera_rotation: [f64; 9],
+    pub landmark_count: u64,
+    pub keyframe_count: u64,
+    pub anchor_count: u64,
+}
+
+impl Default for ArbitMapDebugSnapshot {
+    fn default() -> Self {
+        Self {
+            camera_x: 0.0,
+            camera_y: 0.0,
+            camera_z: 0.0,
+            camera_rotation: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            landmark_count: 0,
+            keyframe_count: 0,
+            anchor_count: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
 pub struct ArbitRelocalizationSummary {
     pub pose: ArbitTransform,
     pub inliers: u32,
@@ -927,6 +983,67 @@ pub unsafe extern "C" fn arbit_get_visible_anchors(
     }
 
     count
+}
+
+/// Gets all visible landmarks in the current camera frame (for debugging)
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arbit_get_visible_landmarks(
+    handle: *mut ArbitCaptureContextHandle,
+    out_landmarks: *mut ArbitProjectedLandmark,
+    max_landmarks: usize,
+) -> usize {
+    if handle.is_null() || out_landmarks.is_null() || max_landmarks == 0 {
+        return 0;
+    }
+
+    let context = handle_to_context(handle);
+    let visible = context.engine.get_visible_landmarks();
+    let count = visible.len().min(max_landmarks);
+    let dest = unsafe { slice::from_raw_parts_mut(out_landmarks, count) };
+
+    for (dst, projected) in dest.iter_mut().zip(visible.iter()) {
+        *dst = ArbitProjectedLandmark {
+            landmark_id: projected.landmark_id,
+            world_x: projected.world_position.x,
+            world_y: projected.world_position.y,
+            world_z: projected.world_position.z,
+            normalized_u: projected.normalized_u,
+            normalized_v: projected.normalized_v,
+            pixel_x: projected.pixel_x,
+            pixel_y: projected.pixel_y,
+            depth: projected.depth,
+        };
+    }
+
+    count
+}
+
+/// Gets a debug snapshot of the map state
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arbit_get_map_debug_snapshot(
+    handle: *mut ArbitCaptureContextHandle,
+    out_snapshot: *mut ArbitMapDebugSnapshot,
+) -> bool {
+    if handle.is_null() || out_snapshot.is_null() {
+        return false;
+    }
+
+    let context = handle_to_context(handle);
+    let snapshot = context.engine.get_map_debug_snapshot();
+
+    unsafe {
+        *out_snapshot = ArbitMapDebugSnapshot {
+            camera_x: snapshot.camera_position.x,
+            camera_y: snapshot.camera_position.y,
+            camera_z: snapshot.camera_position.z,
+            camera_rotation: snapshot.camera_rotation,
+            landmark_count: snapshot.landmark_count as u64,
+            keyframe_count: snapshot.keyframe_count as u64,
+            anchor_count: snapshot.anchor_count as u64,
+        };
+    }
+
+    true
 }
 
 /// Saves map to buffer

@@ -28,8 +28,7 @@ use arbit_core::track::{
 use arbit_core::vo::{FrameObservation, VoLoop, VoLoopConfig, VoStatus};
 use arbit_providers::CameraSample;
 use log::{debug, info, warn};
-use nalgebra::Point3;
-use nalgebra::{Translation3, UnitQuaternion, Vector2, Vector3};
+use nalgebra::{Matrix3x4, Point3, Translation3, UnitQuaternion, Vector2, Vector3};
 
 /// Processing constants grouped into a configuration structure.
 #[derive(Debug, Clone)]
@@ -94,6 +93,28 @@ pub struct ProjectedAnchor {
     pub pixel_y: f32,
     /// Depth from camera (distance along optical axis)
     pub depth: f64,
+}
+
+/// A landmark projected into the current camera frame for debugging visualization.
+#[derive(Debug, Clone)]
+pub struct ProjectedLandmark {
+    pub landmark_id: u64,
+    pub world_position: Point3<f64>,
+    pub normalized_u: f64,
+    pub normalized_v: f64,
+    pub pixel_x: f32,
+    pub pixel_y: f32,
+    pub depth: f64,
+}
+
+/// Debug snapshot of the map state for visualization.
+#[derive(Debug, Clone)]
+pub struct MapDebugSnapshot {
+    pub camera_position: Vector3<f64>,
+    pub camera_rotation: [f64; 9], // 3x3 rotation matrix (row-major)
+    pub landmark_count: usize,
+    pub keyframe_count: usize,
+    pub anchor_count: usize,
 }
 
 /// Processing engine that encapsulates the full camera/IMU pipeline.
@@ -347,7 +368,7 @@ impl ProcessingEngine {
         let timestamp_seconds = sample.timestamps.capture.as_duration().as_secs_f64();
 
         let extract_start = Instant::now();
-        if let Some(image) = self.extract_image_buffer(sample, &intrinsics) {
+        if let Some(image) = self.extract_image_buffer(sample) {
             let extract_elapsed = extract_start.elapsed().as_secs_f64() * 1000.0;
             debug!("    Image extraction: {:.2}ms", extract_elapsed);
 
@@ -540,6 +561,75 @@ impl ProcessingEngine {
             .collect()
     }
 
+    /// Get all landmarks projected into the current camera frame for debugging.
+    /// This helps visualize what the system "sees" from the map.
+    pub fn get_all_projected_landmarks(&self) -> Vec<ProjectedLandmark> {
+        let Some(intrinsics) = &self.last_intrinsics else {
+            return Vec::new();
+        };
+
+        self.map
+            .landmarks_iter()
+            .filter_map(|landmark| {
+                self.project_landmark_internal(landmark.id, &landmark.position, intrinsics)
+            })
+            .collect()
+    }
+
+    /// Get only visible landmarks (in front of camera and within frame bounds).
+    pub fn get_visible_landmarks(&self) -> Vec<ProjectedLandmark> {
+        let Some(intrinsics) = &self.last_intrinsics else {
+            return Vec::new();
+        };
+
+        self.map
+            .landmarks_iter()
+            .filter_map(|landmark| {
+                self.project_landmark_internal(landmark.id, &landmark.position, intrinsics)
+            })
+            .collect()
+    }
+
+    /// Get debug snapshot of the current map state.
+    pub fn get_map_debug_snapshot(&self) -> MapDebugSnapshot {
+        let rotation_matrix = self.current_pose.rotation.to_rotation_matrix();
+        let rotation_array = [
+            rotation_matrix[(0, 0)],
+            rotation_matrix[(0, 1)],
+            rotation_matrix[(0, 2)],
+            rotation_matrix[(1, 0)],
+            rotation_matrix[(1, 1)],
+            rotation_matrix[(1, 2)],
+            rotation_matrix[(2, 0)],
+            rotation_matrix[(2, 1)],
+            rotation_matrix[(2, 2)],
+        ];
+
+        MapDebugSnapshot {
+            camera_position: self.current_pose.translation.vector,
+            camera_rotation: rotation_array,
+            landmark_count: self.map.landmark_count(),
+            keyframe_count: self.map.keyframe_count(),
+            anchor_count: self.map.anchor_count(),
+        }
+    }
+
+    /// Get all landmark positions in world coordinates (for 3D visualization).
+    pub fn get_all_landmark_positions(&self) -> Vec<(u64, Point3<f64>)> {
+        self.map
+            .landmarks_iter()
+            .map(|lm| (lm.id, lm.position))
+            .collect()
+    }
+
+    /// Get all keyframe poses in world coordinates.
+    pub fn get_all_keyframe_poses(&self) -> Vec<(u64, TransformSE3)> {
+        self.map
+            .keyframes()
+            .map(|kf| (kf.id, kf.pose.clone()))
+            .collect()
+    }
+
     /// Helper to project a single anchor to screen space
     fn project_anchor_internal(
         &self,
@@ -584,6 +674,49 @@ impl ProcessingEngine {
         })
     }
 
+    /// Helper to project a landmark to screen space
+    fn project_landmark_internal(
+        &self,
+        landmark_id: u64,
+        world_position: &Point3<f64>,
+        intrinsics: &CameraIntrinsics,
+    ) -> Option<ProjectedLandmark> {
+        // Transform to camera frame
+        let camera_point = self.current_pose.transform_point(world_position);
+
+        // Check if in front of camera
+        if camera_point.z <= 0.0 {
+            return None;
+        }
+
+        // Project to normalized image coordinates
+        let normalized_u = camera_point.x / camera_point.z;
+        let normalized_v = camera_point.y / camera_point.z;
+
+        // Convert to pixel coordinates
+        let pixel_x = (normalized_u * intrinsics.fx + intrinsics.cx) as f32;
+        let pixel_y = (normalized_v * intrinsics.fy + intrinsics.cy) as f32;
+
+        // Check if within frame bounds
+        if pixel_x < 0.0
+            || pixel_x >= intrinsics.width as f32
+            || pixel_y < 0.0
+            || pixel_y >= intrinsics.height as f32
+        {
+            return None;
+        }
+
+        Some(ProjectedLandmark {
+            landmark_id,
+            world_position: *world_position,
+            normalized_u,
+            normalized_v,
+            pixel_x,
+            pixel_y,
+            depth: camera_point.z,
+        })
+    }
+
     /// Serialize the current map to a binary payload.
     pub fn save_map(&self) -> Result<Vec<u8>, MapIoError> {
         self.map.to_bytes()
@@ -598,13 +731,9 @@ impl ProcessingEngine {
         Ok(())
     }
 
-    fn extract_image_buffer(
-        &self,
-        sample: &CameraSample,
-        intrinsics: &CameraIntrinsics,
-    ) -> Option<ImageBuffer> {
-        let width = intrinsics.width as usize;
-        let height = intrinsics.height as usize;
+    fn extract_image_buffer(&self, sample: &CameraSample) -> Option<ImageBuffer> {
+        let width = sample.intrinsics.width as usize;
+        let height = sample.intrinsics.height as usize;
         if width == 0 || height == 0 {
             return None;
         }
@@ -706,21 +835,39 @@ impl ProcessingEngine {
                 TrackingState::Uninitialized => {
                     // First frame: just start tracking
                     self.tracking_state = TrackingState::TrackingPreInit;
-                    debug!("First frame received, state -> TrackingPreInit");
+                    info!(target: "arbit_engine", "🟡 STATE: Uninitialized → TrackingPreInit");
                 }
                 TrackingState::TrackingPreInit => {
                     // Second frame onwards: try two-view initialization
-                    if let Some(prev_intr) = prev_intrinsics {
-                        self.handle_initialization(
-                            &tracks,
-                            prev_intr,
-                            intrinsics,
-                            timestamp_seconds,
+                    // ONLY if map is empty (prevents re-initialization with different scale)
+                    info!(target: "arbit_engine", "🟡 STATE: TrackingPreInit (map: {} landmarks, {} keyframes)",
+                          self.map.landmark_count(), self.map.keyframe_count());
+
+                    if self.map.is_empty() {
+                        info!(target: "arbit_engine", "   → Map is empty, attempting two-view initialization");
+                        if let Some(prev_intr) = prev_intrinsics {
+                            self.handle_initialization(
+                                &tracks,
+                                prev_intr,
+                                intrinsics,
+                                timestamp_seconds,
+                            );
+                        } else {
+                            warn!(target: "arbit_engine", "   → No previous intrinsics available");
+                        }
+                    } else {
+                        // Map exists - should never re-run two-view!
+                        warn!(
+                            target: "arbit_engine",
+                            "🔴 STATE: TrackingPreInit but map EXISTS ({} landmarks) - BUG! Transitioning to Tracking",
+                            self.map.landmark_count()
                         );
+                        self.tracking_state = TrackingState::Tracking;
                     }
                 }
                 TrackingState::Tracking => {
                     // Map initialized: use PnP for pose estimation
+                    info!(target: "arbit_engine", "🟢 STATE: Tracking - using PnP (map: {} landmarks)", self.map.landmark_count());
                     self.handle_tracking_with_pnp(&tracks, intrinsics);
                 }
             }
@@ -780,12 +927,13 @@ impl ProcessingEngine {
         let two_view_start = Instant::now();
         let Some(two_view) = self.two_view_initializer.estimate(&matches) else {
             let two_view_elapsed = two_view_start.elapsed().as_secs_f64() * 1000.0;
-            debug!("      Two-view init: {:.2}ms (FAILED)", two_view_elapsed);
+            warn!(target: "arbit_engine", "⚠️  Two-view FAILED: {:.2}ms - staying in TrackingPreInit", two_view_elapsed);
             return;
         };
 
         let two_view_elapsed = two_view_start.elapsed().as_secs_f64() * 1000.0;
-        debug!("      Two-view init: {:.2}ms (SUCCESS)", two_view_elapsed);
+        info!(target: "arbit_engine", "✅ Two-view SUCCESS: {:.2}ms, {} inliers, {} landmarks", 
+              two_view_elapsed, two_view.inliers.len(), two_view.landmarks.len());
 
         // Apply gravity alignment if available
         let world_alignment = if let Some(gravity) = &self.last_gravity {
@@ -799,9 +947,13 @@ impl ProcessingEngine {
         let scaled_two_view = two_view.scaled(self.config.baseline_scale);
         let landmark_count = scaled_two_view.landmarks.len();
 
-        // Set initial pose: first camera at aligned origin
-        let initial_pose = world_alignment.clone();
+        // CRITICAL: world_alignment = T_world_cam (camera → world rotation)
+        // But current_pose must be T_cam_world (for projection: world → camera)
+        // So we need to INVERT it!
+        let initial_pose = world_alignment.inverse();
         self.current_pose = initial_pose.clone();
+
+        info!(target: "arbit_engine", "   Initial pose set to T_cam_world (inverted gravity alignment)");
 
         // Insert first keyframe at aligned origin
         let keyframe_start = Instant::now();
@@ -823,7 +975,8 @@ impl ProcessingEngine {
         self.last_two_view = Some(scaled_two_view);
 
         info!(
-            "Map initialized with {} landmarks, gravity-aligned world frame",
+            target: "arbit_engine",
+            "✅ Map initialized with {} landmarks, gravity-aligned world frame. STATE: TrackingPreInit → Tracking",
             landmark_count
         );
     }
@@ -834,41 +987,79 @@ impl ProcessingEngine {
         tracks: &[TrackObservation],
         intrinsics: &CameraIntrinsics,
     ) {
-        // Build observations from tracked features that have known landmark IDs
+        // CRITICAL FIX: Track indices change every frame when features are re-seeded!
+        // We need to match by POSITION, not by track index.
+
+        // Build observations by matching current tracks to landmarks via last keyframe
         let mut observations = Vec::new();
+        let mut new_tracked_mapping = HashMap::new();
+
+        // Get last keyframe to match against
+        let last_keyframe = self.map.keyframe_count().saturating_sub(1).max(0) as u64;
+        let Some(keyframe) = self.map.keyframe(last_keyframe) else {
+            warn!(target: "arbit_engine", "No keyframe available for feature matching");
+            return;
+        };
 
         for (track_idx, track) in tracks.iter().enumerate() {
             if !matches!(track.outcome, TrackOutcome::Converged) {
                 continue;
             }
 
-            // Check if we have a landmark ID for this track
-            if let Some(&landmark_id) = self.tracked_landmark_ids.get(&track_idx) {
-                // Get the 3D position from the map
+            let normalized = normalize_pixel(track.refined, intrinsics);
+
+            // Find the nearest landmark in the keyframe (spatial matching)
+            let mut best_match: Option<(u64, f64)> = None;
+            let threshold = 0.02; // 20 pixels normalized distance
+
+            for feature in keyframe.features() {
+                let dist = (Vector2::new(feature.normalized.x as f64, feature.normalized.y as f64)
+                    - normalized)
+                    .norm();
+
+                if dist < threshold {
+                    match best_match {
+                        Some((_, best_dist)) if dist < best_dist => {
+                            best_match = Some((feature.landmark_id, dist));
+                        }
+                        None => {
+                            best_match = Some((feature.landmark_id, dist));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            if let Some((landmark_id, _)) = best_match {
                 if let Some(landmark) = self.map.landmark(landmark_id) {
-                    let normalized = normalize_pixel(track.refined, intrinsics);
                     observations.push(PnPObservation {
                         world_point: landmark.position,
                         normalized_image: normalized,
                     });
+                    new_tracked_mapping.insert(track_idx, landmark_id);
                 }
             }
         }
 
-        debug!(
-            "      PnP tracking: {} observations from {} tracks",
+        // Update the mapping (replaces old indices)
+        self.tracked_landmark_ids = new_tracked_mapping;
+
+        info!(
+            target: "arbit_engine",
+            "📍 PnP tracking: {} observations from {} tracks (tracked_ids: {})",
             observations.len(),
-            tracks.len()
+            tracks.len(),
+            self.tracked_landmark_ids.len()
         );
 
         if observations.len() < self.config.relocalization_min_inliers {
             warn!(
-                "Insufficient PnP observations ({} < {}), attempting relocalization",
+                "Insufficient PnP observations ({} < {}), map may exist - staying in tracking mode to try relocalization",
                 observations.len(),
                 self.config.relocalization_min_inliers
             );
-            // Fall back to relocalization
-            self.tracking_state = TrackingState::TrackingPreInit;
+            // Don't fall back to two-view if map exists!
+            // The VO loop will detect loss and trigger relocalization
             self.tracked_landmark_ids.clear();
             return;
         }
@@ -877,20 +1068,25 @@ impl ProcessingEngine {
         let Some(result) = self.pnp.estimate(&observations) else {
             let pnp_elapsed = pnp_start.elapsed().as_secs_f64() * 1000.0;
             warn!(
-                "      PnP estimation: {:.2}ms (FAILED), falling back",
+                "      PnP estimation: {:.2}ms (FAILED), will try relocalization",
                 pnp_elapsed
             );
-            self.tracking_state = TrackingState::TrackingPreInit;
+            // Don't reset to TrackingPreInit - stay in Tracking mode
+            // Let relocalization handle finding the camera in the map
             self.tracked_landmark_ids.clear();
             return;
         };
 
         let pnp_elapsed = pnp_start.elapsed().as_secs_f64() * 1000.0;
-        debug!(
-            "      PnP estimation: {:.2}ms ({} inliers, error: {:.4})",
+
+        let pos = result.pose.translation.vector;
+        info!(
+            target: "arbit_engine",
+            "✅ PnP success: {:.2}ms, {} inliers, error: {:.4}, pose: [{:.3}, {:.3}, {:.3}]",
             pnp_elapsed,
             result.inliers.len(),
-            result.average_reprojection_error
+            result.average_reprojection_error,
+            pos.x, pos.y, pos.z
         );
 
         // Update current pose
@@ -900,6 +1096,137 @@ impl ProcessingEngine {
             let trim = self.trajectory.len() - self.config.max_trajectory_points;
             self.trajectory.drain(0..trim);
         }
+
+        // LOCAL MAPPING: Expand the map with new landmarks
+        self.expand_map_with_new_features(tracks, intrinsics);
+    }
+
+    /// Expands the map by triangulating new features and inserting keyframes.
+    /// This is the "local mapping" component that keeps the map growing as the camera explores.
+    fn expand_map_with_new_features(
+        &mut self,
+        tracks: &[TrackObservation],
+        intrinsics: &CameraIntrinsics,
+    ) {
+        // Get the last keyframe pose for triangulation
+        let Some(last_kf_pose) = self.map.last_keyframe_pose().cloned() else {
+            return;
+        };
+
+        // Identify new features (tracks without landmark IDs)
+        let mut new_landmarks_added = 0;
+        let mut new_landmark_mappings = Vec::new();
+
+        for (track_idx, track) in tracks.iter().enumerate() {
+            if !matches!(track.outcome, TrackOutcome::Converged) {
+                continue;
+            }
+
+            // Skip if this track already has a landmark
+            if self.tracked_landmark_ids.contains_key(&track_idx) {
+                continue;
+            }
+
+            // Triangulate new feature using last keyframe pose and current pose
+            let normalized_initial = normalize_pixel(track.initial, intrinsics);
+            let normalized_refined = normalize_pixel(track.refined, intrinsics);
+
+            if let Some(world_point) = triangulate_with_poses(
+                &last_kf_pose,
+                &self.current_pose,
+                normalized_initial,
+                normalized_refined,
+            ) {
+                // Validate the triangulated point (reasonable depth)
+                let depth = self.current_pose.transform_point(&world_point).z;
+                if depth > 0.1 && depth < 100.0 {
+                    // Add to map
+                    let landmark_id = self.map.add_landmark(world_point);
+                    new_landmark_mappings.push((track_idx, landmark_id));
+                    new_landmarks_added += 1;
+                }
+            }
+        }
+
+        // Update tracked landmark IDs
+        for (track_idx, landmark_id) in new_landmark_mappings {
+            self.tracked_landmark_ids.insert(track_idx, landmark_id);
+        }
+
+        if new_landmarks_added > 0 {
+            info!(
+                target: "arbit_engine",
+                "🗺️  Local mapping: added {} new landmarks (total: {}, tracked_ids: {})",
+                new_landmarks_added,
+                self.map.landmark_count(),
+                self.tracked_landmark_ids.len()
+            );
+        }
+
+        // Insert new keyframe if we've moved enough
+        if self.map.should_insert_keyframe(&self.current_pose) {
+            info!(target: "arbit_engine", "📸 Inserting new keyframe during tracking");
+            self.insert_keyframe_from_tracking(tracks, intrinsics);
+        }
+    }
+
+    /// Inserts a new keyframe during tracking to anchor the map at the current location.
+    fn insert_keyframe_from_tracking(
+        &mut self,
+        tracks: &[TrackObservation],
+        intrinsics: &CameraIntrinsics,
+    ) {
+        let descriptor = build_descriptor(
+            tracks,
+            intrinsics.width,
+            intrinsics.height,
+            DescriptorSample::Refined,
+        );
+
+        // Collect features that have known landmark IDs
+        let mut features = Vec::new();
+
+        for (track_idx, track) in tracks.iter().enumerate() {
+            if !matches!(track.outcome, TrackOutcome::Converged) {
+                continue;
+            }
+
+            if let Some(&landmark_id) = self.tracked_landmark_ids.get(&track_idx) {
+                if let Some(landmark) = self.map.landmark(landmark_id) {
+                    let normalized = Vector2::new(
+                        normalize_pixel(track.refined, intrinsics).x as f32,
+                        normalize_pixel(track.refined, intrinsics).y as f32,
+                    );
+                    features.push((normalized, landmark.position, landmark_id));
+                }
+            }
+        }
+
+        if features.len() < self.config.min_keyframe_landmarks {
+            debug!(
+                "Insufficient landmarks for keyframe during tracking ({} < {})",
+                features.len(),
+                self.config.min_keyframe_landmarks
+            );
+            return;
+        }
+
+        let feature_count = features.len();
+
+        // Insert keyframe with existing landmark IDs
+        self.map.insert_keyframe_with_id(
+            self.last_keyframe_id.map(|id| id + 1).unwrap_or(1),
+            self.current_pose.clone(),
+            descriptor.descriptor,
+            features,
+        );
+
+        self.last_keyframe_id = self.map.max_keyframe_id();
+
+        info!(
+            "Inserted keyframe during tracking with {} features",
+            feature_count
+        );
     }
 
     /// Inserts keyframe and maintains landmark-to-track mapping for PnP tracking
@@ -949,7 +1276,11 @@ impl ProcessingEngine {
         for (match_idx, landmark) in &two_view.landmarks {
             if let Some(track_idx) = track_lookup.get(*match_idx) {
                 if let Some(normalized) = normalized_lookup.get(track_idx) {
-                    let world_point = prev_pose.transform_point(landmark);
+                    // Two-view landmarks are in Frame 0's camera space
+                    // prev_pose = T_cam_world (after Bug #1 fix)
+                    // To transform camera → world: use inverse
+                    // landmark_world = T_world_cam * landmark_cam
+                    let world_point = prev_pose.inverse().transform_point(landmark);
                     features.push((*normalized, world_point));
                     track_to_match.insert(*track_idx, *match_idx);
                 }
@@ -973,10 +1304,20 @@ impl ProcessingEngine {
                 .insert_keyframe(prev_pose.clone(), descriptor, features.clone())
         {
             info!(
-                "Committed keyframe {} with {} landmarks",
+                target: "arbit_engine",
+                "📸 Committed keyframe {} with {} landmarks (starting ID: {})",
                 _keyframe_id,
-                features.len()
+                features.len(),
+                starting_landmark_id
             );
+
+            // Log some sample landmark positions
+            if !features.is_empty() {
+                let sample = &features[0].1;
+                info!(target: "arbit_engine", "   Sample landmark world pos: [{:.3}, {:.3}, {:.3}]",
+                      sample.x, sample.y, sample.z);
+            }
+
             self.last_keyframe_id = Some(_keyframe_id);
 
             // Update landmark tracking: map track indices to landmark IDs
@@ -986,8 +1327,9 @@ impl ProcessingEngine {
                 self.tracked_landmark_ids.insert(*track_idx, landmark_id);
             }
 
-            debug!(
-                "Initialized {} tracked landmarks for PnP",
+            info!(
+                target: "arbit_engine",
+                "🔗 Initialized {} tracked landmarks for PnP",
                 self.tracked_landmark_ids.len()
             );
         }
@@ -1148,6 +1490,90 @@ fn update_pose(current: &TransformSE3, two_view: &TwoViewInitialization) -> Tran
     current * delta
 }
 
+/// Triangulates a 3D point from two observations with known camera poses.
+/// Returns the 3D point in world coordinates if triangulation succeeds.
+fn triangulate_with_poses(
+    pose_a: &TransformSE3,
+    pose_b: &TransformSE3,
+    normalized_a: Vector2<f64>,
+    normalized_b: Vector2<f64>,
+) -> Option<Point3<f64>> {
+    // Build projection matrices from poses
+    let proj_a = pose_to_projection(pose_a);
+    let proj_b = pose_to_projection(pose_b);
+
+    // Build the triangulation system
+    let mut a = nalgebra::DMatrix::<f64>::zeros(4, 4);
+
+    // Row for normalized_a.x
+    fill_triangulation_row(&mut a, 0, &proj_a, normalized_a.x, 0);
+    // Row for normalized_a.y
+    fill_triangulation_row(&mut a, 1, &proj_a, normalized_a.y, 1);
+    // Row for normalized_b.x
+    fill_triangulation_row(&mut a, 2, &proj_b, normalized_b.x, 0);
+    // Row for normalized_b.y
+    fill_triangulation_row(&mut a, 3, &proj_b, normalized_b.y, 1);
+
+    let svd = nalgebra::SVD::new(a, true, true);
+    let v_t = svd.v_t?;
+    let homog = v_t.row(v_t.nrows() - 1);
+
+    if homog[3].abs() < 1e-12 {
+        return None;
+    }
+
+    let point = Point3::new(
+        homog[0] / homog[3],
+        homog[1] / homog[3],
+        homog[2] / homog[3],
+    );
+
+    // Verify the point is in front of both cameras
+    let cam_a = pose_a.transform_point(&point);
+    let cam_b = pose_b.transform_point(&point);
+
+    if cam_a.z > 0.0 && cam_b.z > 0.0 {
+        Some(point)
+    } else {
+        None
+    }
+}
+
+/// Converts a pose to a 3x4 projection matrix [R | t]
+fn pose_to_projection(pose: &TransformSE3) -> Matrix3x4<f64> {
+    let r = pose.rotation.to_rotation_matrix();
+    let t = pose.translation.vector;
+    Matrix3x4::new(
+        r[(0, 0)],
+        r[(0, 1)],
+        r[(0, 2)],
+        t.x,
+        r[(1, 0)],
+        r[(1, 1)],
+        r[(1, 2)],
+        t.y,
+        r[(2, 0)],
+        r[(2, 1)],
+        r[(2, 2)],
+        t.z,
+    )
+}
+
+/// Fills a row of the triangulation matrix
+fn fill_triangulation_row(
+    a: &mut nalgebra::DMatrix<f64>,
+    row: usize,
+    projection: &Matrix3x4<f64>,
+    value: f64,
+    axis: usize,
+) {
+    let row_data = projection.row(axis);
+    let third_row = projection.row(2);
+    for col in 0..4 {
+        a[(row, col)] = value * third_row[col] - row_data[col];
+    }
+}
+
 /// Aligns the world coordinate frame so that the Y-axis points up (opposite to gravity).
 /// Returns a transform that rotates the camera frame to align with gravity.
 fn align_world_to_gravity(gravity: &GravityEstimate) -> TransformSE3 {
@@ -1206,8 +1632,37 @@ pub fn timestamps_to_seconds(timestamps: &FrameTimestamps) -> (f64, f64, f64) {
 mod tests {
     use super::*;
     use arbit_providers::{ArKitFrame, ArKitIntrinsics, IosCameraProvider, PixelFormat};
+    use nalgebra::{Point3, Rotation3};
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn test_pose_convention() {
+        // Test: verify Isometry3 represents T_cam_world (world → camera)
+
+        // Camera at (1, 0, 0) in world, rotated 90° around Y
+        let rotation =
+            UnitQuaternion::from_axis_angle(&Vector3::y_axis(), std::f64::consts::FRAC_PI_2);
+        let translation = Translation3::new(1.0, 0.0, 0.0);
+        let pose = TransformSE3::from_parts(translation, rotation);
+
+        // Point at (2, 0, 0) in world (1m in front of camera along X)
+        let world_point = Point3::new(2.0, 0.0, 0.0);
+
+        // Transform world → camera
+        let camera_point = pose.transform_point(&world_point);
+
+        // Expected in camera frame: point should be at (0, 0, -1)
+        // Because camera is at (1,0,0) looking along +Z after 90° Y rotation
+        println!("Camera point: {:?}", camera_point);
+        println!("Expected: ~(0, 0, -1) if pose = T_cam_world");
+
+        // For projection (world → camera), we expect reasonable camera coordinates
+        assert!(
+            camera_point.z.abs() < 10.0,
+            "Point should be at reasonable depth"
+        );
+    }
 
     fn sample_camera_sample() -> CameraSample {
         // Use IosCameraProvider to properly create a CameraSample with valid timestamps

@@ -49,6 +49,8 @@ final class CameraCaptureManager: NSObject, ObservableObject {
     @Published private(set) var mapStats: MapStats = MapStats(keyframes: 0, landmarks: 0, anchors: 0)
     @Published private(set) var anchorPoses: [UInt64: simd_double4x4] = [:]
     @Published private(set) var visibleAnchors: [ProjectedAnchor] = []
+    @Published private(set) var visibleLandmarks: [ProjectedLandmark] = []
+    @Published private(set) var mapDebugSnapshot: MapDebugSnapshot?
     @Published private(set) var relocalizationSummary: RelocalizationSummary?
     @Published private(set) var lastPoseMatrix: simd_double4x4?
     @Published private(set) var mapStatusMessage: String?
@@ -464,7 +466,6 @@ extension CameraCaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate {
 
         guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else { return }
 
-        let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
         let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
         let dataLength = bytesPerRow * height
@@ -560,6 +561,8 @@ extension CameraCaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         let relocalization = frameState?.relocalization
         let latestPoseMatrix = trajectory.last.map { self.poseMatrix(from: $0) }
         let projectedAnchors = context.getVisibleAnchors(maxCount: 32)
+        let projectedLandmarks = context.getVisibleLandmarks(maxCount: 200)
+        let debugSnapshot = context.getMapDebugSnapshot()
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -574,6 +577,8 @@ extension CameraCaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate {
                                      anchors: frameState?.anchorCount ?? 0)
             self.anchorPoses = anchorDictionary
             self.visibleAnchors = projectedAnchors
+            self.visibleLandmarks = projectedLandmarks
+            self.mapDebugSnapshot = debugSnapshot
             self.relocalizationSummary = relocalization
             self.lastPoseMatrix = latestPoseMatrix
         }

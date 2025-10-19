@@ -280,6 +280,17 @@ impl WorldMap {
         self.landmarks.get(&id)
     }
 
+    pub fn landmarks_iter(&self) -> impl Iterator<Item = &MapLandmark> {
+        self.landmarks.values()
+    }
+
+    pub fn add_landmark(&mut self, position: Point3<f64>) -> u64 {
+        let id = self.next_landmark_id;
+        self.next_landmark_id = self.next_landmark_id.saturating_add(1);
+        self.landmarks.insert(id, MapLandmark { id, position });
+        id
+    }
+
     pub fn keyframe(&self, id: u64) -> Option<&KeyframeData> {
         self.keyframes.get(&id)
     }
