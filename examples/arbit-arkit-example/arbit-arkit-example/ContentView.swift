@@ -51,7 +51,6 @@ struct ContentView: View {
     var body: some View {
         ZStack {
             CameraPreviewView(session: cameraManager.session)
-                .ignoresSafeArea()
 
             if cameraManager.authorizationStatus != .authorized {
                 PermissionOverlay()
