@@ -69,10 +69,16 @@ pub enum TrackOutcome {
 
 #[derive(Debug, Clone, Copy)]
 pub struct TrackObservation {
+    /// The initial position of the feature in the previous frame.
     pub initial: Vector2<f32>,
+    /// The refined position of the feature in the current frame.
     pub refined: Vector2<f32>,
+    /// The number of iterations used to refine the position.
     pub iterations: u32,
+    /// The residual error of the refined position. Computed as the square root of the mean squared error.
+    /// The smaller the residual, the better the tracking.
     pub residual: f32,
+    /// The outcome of the tracking: converged, diverged, or out of bounds (not in the image).
     pub outcome: TrackOutcome,
 }
 
