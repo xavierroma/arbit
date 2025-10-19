@@ -1,0 +1,68 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
+
+[project]
+name = "arbit"
+version = "0.1.0"
+description = "Python bindings for Arbit visual-inertial SLAM engine"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+
+
+dependencies = [
+    "numpy>=1.20.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "black>=22.0",
+    "mypy>=0.990",
+    "ruff>=0.1.0",
+]
+examples = [
+    "jupyter>=1.0",
+    "matplotlib>=3.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/arbit/arbit"
+Documentation = "https://github.com/arbit/arbit/tree/main/crates/arbit-py"
+Repository = "https://github.com/arbit/arbit"
+Issues = "https://github.com/arbit/arbit/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["arbit"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"arbit/py.typed" = "arbit/py.typed"
+
+[tool.hatch.build.targets.sdist]
+packages = ["arbit"]
+include = [
+    "arbit/",
+    "scripts/",
+    "hatch_build.py",
+    "README.md",
+    "QUICKSTART.md",
+]
+
+[tool.black]
+line-length = 100
+target-version = ['py38', 'py39', 'py310', 'py311']
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+
