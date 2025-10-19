@@ -12,7 +12,7 @@ use arbit_core::imu::{
     MotionDetector, MotionState, MotionStats, PreintegratedImu, PreintegrationConfig,
 };
 use arbit_core::init::two_view::{
-    FeatureMatch, RansacParams, TwoViewInitialization, TwoViewInitializer,
+    FeatureMatch, TwoViewInitialization, TwoViewInitializationParams, TwoViewInitializer,
 };
 use arbit_core::map::{
     self, build_descriptor, Anchor, DescriptorInfo, DescriptorSample, KeyframeData, MapIoError,
@@ -179,7 +179,7 @@ impl ProcessingEngine {
             tracker: Tracker::new(LucasKanadeConfig::default()),
             last_tracks: Vec::new(),
             last_two_view: None,
-            two_view_initializer: TwoViewInitializer::new(RansacParams::default()),
+            two_view_initializer: TwoViewInitializer::new(TwoViewInitializationParams::default()),
             trajectory: vec![Vector3::new(0.0, 0.0, 0.0)],
             current_pose: TransformSE3::identity(),
             last_gravity: None,

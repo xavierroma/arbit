@@ -11,16 +11,22 @@ pub struct FeatureMatch {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct RansacParams {
-    pub iterations: usize,
-    pub threshold: f64,
+pub struct TwoViewInitializationParams {
+    pub ransac_iterations: usize,
+    pub ransac_threshold: f64,
+    pub ransac_sample_size: usize,
+    pub min_matches: usize,
+    pub min_parallax: f64,
 }
 
-impl Default for RansacParams {
+impl Default for TwoViewInitializationParams {
     fn default() -> Self {
         Self {
-            iterations: 200,
-            threshold: 1e-3,
+            ransac_iterations: 200,
+            ransac_threshold: 1e-3,
+            ransac_sample_size: 8,
+            min_matches: 100,
+            min_parallax: 10.0,
         }
     }
 }
@@ -42,11 +48,11 @@ pub struct DecomposedEssential {
 }
 
 pub struct TwoViewInitializer {
-    params: RansacParams,
+    params: TwoViewInitializationParams,
 }
 
 impl TwoViewInitializer {
-    pub fn new(params: RansacParams) -> Self {
+    pub fn new(params: TwoViewInitializationParams) -> Self {
         Self { params }
     }
 
@@ -56,14 +62,18 @@ impl TwoViewInitializer {
             matches.len()
         );
 
-        if matches.len() < 8 {
+        if matches.len() < self.params.min_matches {
             debug!(
-                "Insufficient matches for two-view initialization: {} < 8",
-                matches.len()
+                "Insufficient matches for two-view initialization: {} < {}",
+                matches.len(),
+                self.params.min_matches,
             );
             return None;
         }
-        // Validate input data is not degenerate
+        let mut parallax_sum = 0.0;
+        let mut parallax_samples = 0usize;
+
+        // Validate input data is not degenerate while accumulating parallax
         for (i, m) in matches.iter().enumerate() {
             if !m.normalized_a.x.is_finite()
                 || !m.normalized_a.y.is_finite()
@@ -73,6 +83,34 @@ impl TwoViewInitializer {
                 debug!("Match {} has non-finite coordinates, rejecting", i);
                 return None;
             }
+
+            let dir_a = Vector3::new(m.normalized_a.x, m.normalized_a.y, 1.0);
+            let dir_b = Vector3::new(m.normalized_b.x, m.normalized_b.y, 1.0);
+            let norm_a = dir_a.norm();
+            let norm_b = dir_b.norm();
+
+            if norm_a <= f64::EPSILON || norm_b <= f64::EPSILON {
+                debug!("Match {} has near-zero direction norm, rejecting", i);
+                return None;
+            }
+
+            let cos_theta = (dir_a.dot(&dir_b) / (norm_a * norm_b)).clamp(-1.0, 1.0);
+            parallax_sum += cos_theta.acos();
+            parallax_samples += 1;
+        }
+
+        if parallax_samples == 0 {
+            debug!("No valid matches available to evaluate parallax, rejecting");
+            return None;
+        }
+
+        let average_parallax_deg = (parallax_sum / parallax_samples as f64).to_degrees();
+        if average_parallax_deg < self.params.min_parallax {
+            debug!(
+                "Tracking not strong enough: average parallax {:.2}° < {:.2}°",
+                average_parallax_deg, self.params.min_parallax,
+            );
+            return None;
         }
 
         // Check for sufficient spread (not all points at origin)
@@ -93,24 +131,18 @@ impl TwoViewInitializer {
 
         let mut rng = SmallRng::from_entropy();
         let mut best_inliers = Vec::new();
-        debug!("Running {} RANSAC iterations", self.params.iterations);
+        debug!(
+            "Running {} RANSAC iterations",
+            self.params.ransac_iterations
+        );
 
-        for iter_count in 0..self.params.iterations {
-            let sample_indices = sample(&mut rng, matches.len(), 8);
-            let mut subset = [FeatureMatch {
-                normalized_a: Vector2::zeros(),
-                normalized_b: Vector2::zeros(),
-            }; 8];
-            for (dst, idx) in subset.iter_mut().zip(sample_indices.iter()) {
-                *dst = matches[idx];
-            }
-
-            trace!("RANSAC iteration {}: sampled indices", iter_count);
-
-            trace!("About to call estimate_essential with 8 samples");
+        for iter_count in 0..self.params.ransac_iterations {
+            let sample_indices = sample(&mut rng, matches.len(), self.params.ransac_sample_size);
+            let subset = sample_indices
+                .iter()
+                .map(|idx| matches[idx])
+                .collect::<Vec<FeatureMatch>>();
             let e_candidate = estimate_essential(&subset);
-            trace!("RANSAC iteration {}: essential matrix computed", iter_count);
-
             if !e_candidate.iter().all(|v| v.is_finite()) {
                 trace!(
                     "RANSAC iteration {}: non-finite essential matrix, skipping",
@@ -119,7 +151,7 @@ impl TwoViewInitializer {
                 continue;
             }
 
-            let inliers = score_inliers(matches, &e_candidate, self.params.threshold);
+            let inliers = score_inliers(matches, &e_candidate, self.params.ransac_threshold);
             if inliers.len() > best_inliers.len() {
                 best_inliers = inliers;
                 debug!(
@@ -444,9 +476,12 @@ mod tests {
         let points = generate_scene(100, 1.5, 3.5);
         let matches = project_scene(&points, rotation, translation);
 
-        let initializer = TwoViewInitializer::new(RansacParams {
-            iterations: 300,
-            threshold: 5e-4,
+        let initializer = TwoViewInitializer::new(TwoViewInitializationParams {
+            ransac_iterations: 300,
+            ransac_threshold: 5e-4,
+            ransac_sample_size: 16,
+            min_matches: 100,
+            min_parallax: 10.0,
         });
 
         let result = initializer
@@ -482,7 +517,7 @@ mod tests {
 
     #[test]
     fn initializer_rejects_small_sets() {
-        let initializer = TwoViewInitializer::new(RansacParams::default());
+        let initializer = TwoViewInitializer::new(TwoViewInitializationParams::default());
         let matches = vec![
             FeatureMatch {
                 normalized_a: Vector2::new(0.0, 0.0),
