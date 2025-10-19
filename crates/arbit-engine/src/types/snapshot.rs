@@ -2,8 +2,12 @@ use crate::ProcessingEngine;
 use nalgebra::Vector3;
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "debug-server")]
+use utoipa::ToSchema;
+
 /// Snapshot of engine state at a point in time
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "debug-server", derive(ToSchema))]
 pub struct EngineSnapshot {
     pub timestamp: f64,
     pub frame_index: u64,
@@ -15,6 +19,7 @@ pub struct EngineSnapshot {
 
 /// Tracking metrics at a point in time
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "debug-server", derive(ToSchema))]
 pub struct TrackingMetrics {
     pub total_tracks: usize,
     pub converged_tracks: usize,
@@ -24,6 +29,7 @@ pub struct TrackingMetrics {
 
 /// IMU-related metrics at a point in time
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "debug-server", derive(ToSchema))]
 pub struct ImuMetrics {
     pub has_preintegration: bool,
     pub gravity_estimate: Option<[f64; 3]>,
@@ -35,6 +41,7 @@ pub struct ImuMetrics {
 
 /// Map statistics at a point in time
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "debug-server", derive(ToSchema))]
 pub struct MapMetrics {
     pub keyframe_count: u64,
     pub landmark_count: u64,
@@ -43,6 +50,7 @@ pub struct MapMetrics {
 
 /// Camera pose snapshot
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "debug-server", derive(ToSchema))]
 pub struct PoseSnapshot {
     pub translation: [f64; 3],
     pub rotation_quaternion: [f64; 4], // [x, y, z, w]
@@ -50,6 +58,7 @@ pub struct PoseSnapshot {
 
 /// Trajectory point (pose over time)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "debug-server", derive(ToSchema))]
 pub struct TrajectoryPoint {
     pub timestamp: f64,
     pub x: f64,

@@ -12,7 +12,6 @@ debug-server = [
     "dep:serde_json",
     "dep:image",
     "dep:lru",
-    "dep:tracing",
     "dep:tracing-subscriber",
     "dep:metrics",
     "dep:metrics-exporter-prometheus",
@@ -30,13 +29,13 @@ arbit-providers = { path = "../arbit-providers" }
 log = "0.4"
 nalgebra = "0.34.1"
 serde = { version = "1.0", features = ["derive"] }
+tracing = "0.1.41"
 axum = { version = "0.8.6", optional = true }
 tokio = { version = "1.47.1", features = ["rt", "rt-multi-thread", "macros", "sync", "net", "time"], optional = true }
 tower-http = { version = "0.6.6", features = ["cors", "trace", "timeout"], optional = true }
 serde_json = { version = "1.0.145", optional = true }
 image = { version = "0.25.8", default-features = false, features = ["png", "jpeg"], optional = true }
 lru = { version = "0.16.1", optional = true }
-tracing = { version = "0.1.41", optional = true }
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"], optional = true }
 metrics = { version = "0.24.2", optional = true }
 metrics-exporter-prometheus = { version = "0.17.2", optional = true }
@@ -46,3 +45,6 @@ utoipa-swagger-ui = { version = "9.0.2", features = ["axum"], optional = true }
 ts-rs = { version = "11.0.1", optional = true }
 thiserror = "2.0.17"
 tower = { version = "0.5.2", optional = true, features = ["limit", "timeout", "util"] }
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }

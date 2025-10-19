@@ -183,6 +183,7 @@ dependencies = [
  "env_logger",
  "log",
  "nalgebra",
+ "tracing-subscriber",
 ]
 
 [[package]]

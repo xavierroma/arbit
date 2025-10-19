@@ -3,8 +3,7 @@ pub mod types;
 #[cfg(feature = "debug-server")]
 pub mod debug_server;
 
-use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use arbit_core::img::{build_pyramid, ImageBuffer, Pyramid, PyramidLevel};
 use arbit_core::imu::{
@@ -23,12 +22,14 @@ use arbit_core::math::CameraIntrinsics;
 use arbit_core::relocalize::{PnPObservation, PnPRansac, PnPRansacParams, PnPResult};
 use arbit_core::time::FrameTimestamps;
 use arbit_core::track::{
-    FeatureGridConfig, FeatureSeeder, LucasKanadeConfig, TrackObservation, TrackOutcome, Tracker,
+    FeatureGridConfig, FeatureSeed, FeatureSeeder, LucasKanadeConfig, TrackObservation,
+    TrackOutcome, Tracker,
 };
 use arbit_core::vo::{FrameObservation, VoLoop, VoLoopConfig, VoStatus};
 use arbit_providers::CameraSample;
 use log::{debug, info, warn};
 use nalgebra::{Matrix3x4, Point3, Translation3, UnitQuaternion, Vector2, Vector3};
+use tracing::debug_span;
 
 /// Processing constants grouped into a configuration structure.
 #[derive(Debug, Clone)]
@@ -42,6 +43,9 @@ pub struct EngineConfig {
     pub relocalization_min_inliers: usize,
     pub pnp_iterations: usize,
     pub pnp_threshold: f64,
+
+    pub frame_window_size: usize,
+    pub two_view_max_lookback: usize,
 }
 
 impl Default for EngineConfig {
@@ -56,6 +60,8 @@ impl Default for EngineConfig {
             relocalization_min_inliers: 12,
             pnp_iterations: 512,
             pnp_threshold: 1e-2,
+            frame_window_size: 10,
+            two_view_max_lookback: 10,
         }
     }
 }
@@ -119,38 +125,62 @@ pub struct MapDebugSnapshot {
     pub anchor_count: usize,
 }
 
+pub struct FrameData {
+    // Identification
+    pub frame_index: u64,
+    pub timestamp_seconds: f64,
+
+    // Visual data
+    pub image: ImageBuffer,
+    pub pyramid: Pyramid,
+    pub intrinsics: CameraIntrinsics,
+
+    // Tracking results
+    pub tracks: Vec<TrackObservation>,
+    pub seeds: Vec<FeatureSeed>,
+
+    // Pose estimation (if available)
+    pub pose: Option<TransformSE3>,
+    pub gravity: Option<GravityEstimate>,
+
+    // Optional: IMU preintegration from previous frame
+    pub preintegrated_imu: Option<PreintegratedImu>,
+}
 /// Processing engine that encapsulates the full camera/IMU pipeline.
 pub struct ProcessingEngine {
     config: EngineConfig,
     tracking_state: TrackingState,
-    last_intrinsics: Option<CameraIntrinsics>,
-    prev_pyramid: Option<Pyramid>,
-    pyramid_cache: Vec<PyramidLevelCache>,
-    seeder: FeatureSeeder,
-    tracker: Tracker,
-    last_tracks: Vec<TrackObservation>,
+
+    frame_window: VecDeque<FrameData>,
+    // last_intrinsics: Option<CameraIntrinsics>,
+    // prev_pyramid: Option<Pyramid>,
+    // pyramid_cache: Vec<PyramidLevelCache>,
+    // last_tracks: Vec<TrackObservation>,
     last_two_view: Option<TwoViewInitialization>,
-    two_view_initializer: TwoViewInitializer,
     trajectory: Vec<Vector3<f64>>,
     current_pose: TransformSE3,
     last_gravity: Option<GravityEstimate>,
-    gravity_estimator: GravityEstimator,
     map: WorldMap,
     pnp: PnPRansac,
-    vo_loop: VoLoop,
     frame_index: u64,
     last_relocalization: Option<PnPResult>,
     last_keyframe_id: Option<u64>,
     // Track indexed landmarks for PnP
     tracked_landmark_ids: HashMap<usize, u64>,
     // IMU preintegration components
+    last_motion_stats: Option<MotionStats>,
+    last_preintegrated: Option<PreintegratedImu>,
+    preintegration_count: usize,
+
+    seeder: FeatureSeeder,
+    tracker: Tracker,
+    two_view_initializer: TwoViewInitializer,
+    gravity_estimator: GravityEstimator,
+    vo_loop: VoLoop,
     preintegrator: Option<ImuPreintegrator>,
     motion_detector: Option<MotionDetector>,
     gyro_bias_estimator: Option<GyroBiasEstimator>,
     accel_bias_estimator: Option<AccelBiasEstimator>,
-    last_motion_stats: Option<MotionStats>,
-    last_preintegrated: Option<PreintegratedImu>,
-    preintegration_count: usize,
 }
 
 impl ProcessingEngine {
@@ -174,12 +204,9 @@ impl ProcessingEngine {
         let mut engine = Self {
             config,
             tracking_state: TrackingState::Uninitialized,
-            last_intrinsics: None,
-            prev_pyramid: None,
-            pyramid_cache: Vec::new(),
+            frame_window: VecDeque::new(),
             seeder: FeatureSeeder::new(FeatureGridConfig::default()),
             tracker: Tracker::new(LucasKanadeConfig::default()),
-            last_tracks: Vec::new(),
             last_two_view: None,
             two_view_initializer: TwoViewInitializer::new(TwoViewInitializationParams::default()),
             trajectory: vec![Vector3::new(0.0, 0.0, 0.0)],
@@ -383,32 +410,58 @@ impl ProcessingEngine {
     pub fn ingest_camera_sample(&mut self, sample: &CameraSample) {
         // Step 1: Finish IMU preintegration
         let _preintegrated = self.finish_imu_preintegration();
-
-        let intrinsics = sample.intrinsics.clone();
-        let prev_intrinsics = self.last_intrinsics.clone();
-        let timestamp_seconds = sample.timestamps.capture.as_duration().as_secs_f64();
-
         // Step 2: Extract image buffer
-        let Some(image) = self.extract_image_buffer(sample) else {
-            warn!(
-                "Failed to extract image buffer for frame at {:.3}s",
-                timestamp_seconds
-            );
-            self.pyramid_cache.clear();
-            self.last_tracks.clear();
-            self.last_intrinsics = Some(intrinsics);
+        let image = match self.extract_image_buffer(sample) {
+            Some(image) => image,
+            None => {
+                warn!(
+                    "Failed to extract image buffer for frame at {:.3}s",
+                    sample.timestamps.capture.as_duration().as_secs_f64()
+                );
+                return;
+            }
+        };
+        let intrinsics = sample.intrinsics.clone();
+        // Step 3: Build pyramid
+        let pyramid = self.step_build_pyramid(&image);
+
+        let mut frame_data = FrameData {
+            frame_index: self.frame_index,
+            timestamp_seconds: sample.timestamps.capture.as_duration().as_secs_f64(),
+            image,
+            pyramid,
+            intrinsics,
+            tracks: Vec::new(),
+            seeds: Vec::new(),
+            pose: None,
+            gravity: None,
+            preintegrated_imu: _preintegrated,
+        };
+
+        let Some(prev_frame) = self.prev_frame() else {
+            warn!("No previous frame found");
+            self.frame_window.push_front(frame_data);
+            self.frame_index += 1;
             return;
         };
 
-        // Steps 3-8: Main visual processing pipeline
-        self.process_camera_frame(
-            image,
-            &intrinsics,
-            prev_intrinsics.as_ref(),
-            timestamp_seconds,
+        // Step 4 & 5: Seed and track features
+        let tracks = self.step_seed_and_track_features(
+            &prev_frame.pyramid,
+            &frame_data.pyramid,
+            &frame_data.intrinsics,
         );
+        frame_data.tracks = tracks;
+        self.frame_window.push_front(frame_data);
+        if self.frame_window.len() > self.config.frame_window_size {
+            self.frame_window.pop_back();
+        }
+        self.frame_index += 1;
 
-        self.last_intrinsics = Some(intrinsics);
+        // Step 6: Estimate pose (initialization or tracking)
+        self.step_estimate_pose();
+        // Step 7 & 8: Build descriptor and update visual odometry
+        // self.step_visual_odometry(intrinsics, timestamp_seconds);
     }
 
     /// Ingest an accelerometer sample (legacy method - prefer ingest_imu_sample).
@@ -426,14 +479,40 @@ impl ProcessingEngine {
     // PUBLIC ACCESSORS: State Inspection
     // ========================================================================
 
+    fn current_frame(&self) -> Option<&FrameData> {
+        self.frame_window.front()
+    }
+
+    fn prev_frame(&self) -> Option<&FrameData> {
+        self.frame_window.get(1)
+    }
+
     /// Cached pyramid levels for inspection.
-    pub fn pyramid_levels(&self) -> &[PyramidLevelCache] {
-        &self.pyramid_cache
+    pub fn pyramid_levels(&self) -> Vec<PyramidLevelCache> {
+        self.current_frame()
+            .map(|frame| {
+                frame
+                    .pyramid
+                    .levels()
+                    .iter()
+                    .map(|level| PyramidLevelCache {
+                        octave: level.octave as u32,
+                        scale: level.scale,
+                        width: level.image.width() as u32,
+                        height: level.image.height() as u32,
+                        bytes_per_row: level.image.width(),
+                        pixels: self.encode_luma(level),
+                    })
+                    .collect::<Vec<PyramidLevelCache>>()
+            })
+            .unwrap_or_default()
     }
 
     /// Last tracked feature observations.
     pub fn tracked_points(&self) -> &[TrackObservation] {
-        &self.last_tracks
+        self.current_frame()
+            .map(|f| f.tracks.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Latest two-view initialization summary, if available.
@@ -516,7 +595,10 @@ impl ProcessingEngine {
         normalized_v: f64,
         depth: f64,
     ) -> Option<u64> {
-        let intrinsics = self.last_intrinsics.as_ref()?;
+        let Some(intrinsics) = self.current_frame().map(|f| &f.intrinsics) else {
+            warn!("No intrinsics available");
+            return None;
+        };
 
         // Convert normalized [0,1] to pixel coordinates
         let pixel_x = normalized_u * intrinsics.width as f64;
@@ -562,7 +644,7 @@ impl ProcessingEngine {
     /// - In front of the camera (positive depth)
     /// - Within the frame bounds
     pub fn get_visible_anchors(&self) -> Vec<ProjectedAnchor> {
-        let Some(intrinsics) = &self.last_intrinsics else {
+        let Some(intrinsics) = self.current_frame().map(|f| &f.intrinsics) else {
             return Vec::new();
         };
 
@@ -575,7 +657,7 @@ impl ProcessingEngine {
     /// Get all landmarks projected into the current camera frame for debugging.
     /// This helps visualize what the system "sees" from the map.
     pub fn get_all_projected_landmarks(&self) -> Vec<ProjectedLandmark> {
-        let Some(intrinsics) = &self.last_intrinsics else {
+        let Some(intrinsics) = self.current_frame().map(|f| &f.intrinsics) else {
             return Vec::new();
         };
 
@@ -589,7 +671,7 @@ impl ProcessingEngine {
 
     /// Get only visible landmarks (in front of camera and within frame bounds).
     pub fn get_visible_landmarks(&self) -> Vec<ProjectedLandmark> {
-        let Some(intrinsics) = &self.last_intrinsics else {
+        let Some(intrinsics) = self.current_frame().map(|f| &f.intrinsics) else {
             return Vec::new();
         };
 
@@ -774,60 +856,13 @@ impl ProcessingEngine {
         ))
     }
 
-    /// Main camera frame processing pipeline with explicit steps.
-    fn process_camera_frame(
-        &mut self,
-        image: ImageBuffer,
-        intrinsics: &CameraIntrinsics,
-        prev_intrinsics: Option<&CameraIntrinsics>,
-        timestamp_seconds: f64,
-    ) {
-        debug!("Processing frame: {}x{}", image.width(), image.height());
-
-        // Step 3: Build image pyramid
-        let pyramid = self.step_build_pyramid(image);
-
-        // Step 4 & 5: Seed and track features (requires previous pyramid)
-        if let Some(prev_pyramid) = &self.prev_pyramid {
-            let tracks = self.step_seed_and_track_features(prev_pyramid, &pyramid, intrinsics);
-            self.last_tracks = tracks.clone();
-
-            // Step 6: Estimate pose (initialization or tracking)
-            self.step_estimate_pose(&tracks, prev_intrinsics, intrinsics, timestamp_seconds);
-        }
-
-        // Store pyramid for next frame
-        self.prev_pyramid = Some(pyramid);
-
-        // Step 7 & 8: Build descriptor and update visual odometry
-        self.step_visual_odometry(intrinsics, timestamp_seconds);
-    }
-
     /// Step 3: Build image pyramid for multi-scale feature tracking.
-    fn step_build_pyramid(&mut self, image: ImageBuffer) -> Pyramid {
-        let pyramid_start = Instant::now();
+    fn step_build_pyramid(&self, image: &ImageBuffer) -> Pyramid {
+        let _span = debug_span!("step_build_pyramid").entered();
         let pyramid = build_pyramid(&image, self.config.pyramid_octaves);
         let levels = pyramid.levels().len();
-        let pyramid_elapsed = pyramid_start.elapsed().as_secs_f64() * 1000.0;
 
-        debug!(
-            "      [3] Pyramid: {:.2}ms ({} levels)",
-            pyramid_elapsed, levels
-        );
-
-        // Cache pyramid levels for visualization
-        self.pyramid_cache = pyramid
-            .levels()
-            .iter()
-            .map(|level| PyramidLevelCache {
-                octave: level.octave as u32,
-                scale: level.scale,
-                width: level.image.width() as u32,
-                height: level.image.height() as u32,
-                bytes_per_row: level.image.width(),
-                pixels: self.encode_luma(level),
-            })
-            .collect();
+        debug!("      [3] Pyramid: ({} levels)", levels);
 
         pyramid
     }
@@ -840,52 +875,46 @@ impl ProcessingEngine {
         intrinsics: &CameraIntrinsics,
     ) -> Vec<TrackObservation> {
         // Step 4: Seed features
-        let seed_start = Instant::now();
-        let seeds = self.seeder.seed(&prev_pyramid.levels()[0]);
-        let seed_elapsed = seed_start.elapsed().as_secs_f64() * 1000.0;
-        debug!(
-            "      [4] Seeding: {:.2}ms ({} seeds)",
-            seed_elapsed,
-            seeds.len()
-        );
+        let seeds = {
+            let _span = debug_span!("seed_features").entered();
+            let seeds = self.seeder.seed(&prev_pyramid.levels()[0]);
+            debug!("      [4] Seeding: ({} seeds)", seeds.len());
+            seeds
+        };
 
         // Step 5: Track features
-        let track_start = Instant::now();
-        let mut tracks = Vec::with_capacity(seeds.len());
-        for seed in seeds.iter().take(256) {
-            let observation = self.tracker.track_with_prior(
-                prev_pyramid,
-                curr_pyramid,
-                seed.position,
-                None,
-                Some(intrinsics),
-            );
-            tracks.push(observation);
-        }
-        let track_elapsed = track_start.elapsed().as_secs_f64() * 1000.0;
+        let tracks = {
+            let _span = debug_span!("track_features").entered();
+            let mut tracks = Vec::with_capacity(seeds.len());
+            for seed in seeds.iter() {
+                let observation = self.tracker.track_with_prior(
+                    prev_pyramid,
+                    curr_pyramid,
+                    seed.position,
+                    None,
+                    Some(intrinsics),
+                );
+                tracks.push(observation);
+            }
 
-        let converged_tracks = tracks
-            .iter()
-            .filter(|t| matches!(t.outcome, TrackOutcome::Converged))
-            .count();
-        debug!(
-            "      [5] Tracking: {:.2}ms ({} tracks, {} converged)",
-            track_elapsed,
-            tracks.len(),
-            converged_tracks
-        );
+            let converged_tracks = tracks
+                .iter()
+                .filter(|t| matches!(t.outcome, TrackOutcome::Converged))
+                .count();
+            debug!(
+                "      [5] Tracking: ({} tracks, {} converged)",
+                tracks.len(),
+                converged_tracks
+            );
+
+            tracks
+        };
 
         tracks
     }
 
     /// Step 6: Estimate camera pose using initialization or PnP tracking.
-    fn step_estimate_pose(
-        &mut self,
-        tracks: &[TrackObservation],
-        prev_intrinsics: Option<&CameraIntrinsics>,
-        curr_intrinsics: &CameraIntrinsics,
-        timestamp_seconds: f64,
-    ) {
+    fn step_estimate_pose(&mut self) {
         match self.tracking_state {
             TrackingState::Uninitialized => {
                 // First frame: transition to pre-init
@@ -898,16 +927,7 @@ impl ProcessingEngine {
                       self.map.landmark_count(), self.map.keyframe_count());
 
                 if self.map.is_empty() {
-                    if let Some(prev_intr) = prev_intrinsics {
-                        self.run_two_view_initialization(
-                            tracks,
-                            prev_intr,
-                            curr_intrinsics,
-                            timestamp_seconds,
-                        );
-                    } else {
-                        warn!(target: "arbit_engine", "         No previous intrinsics available");
-                    }
+                    self.run_two_view_initialization();
                 } else {
                     // Map exists but we're in pre-init state - transition to tracking
                     warn!(
@@ -921,27 +941,42 @@ impl ProcessingEngine {
             TrackingState::Tracking => {
                 // Map initialized: use PnP for pose estimation
                 info!(target: "arbit_engine", "      [6] Pose: Tracking with PnP (map: {} landmarks)", self.map.landmark_count());
-                self.run_pnp_tracking(tracks, curr_intrinsics);
+
+                self.run_pnp_tracking();
             }
         }
     }
 
     /// Step 7 & 8: Build scene descriptor and update visual odometry monitoring.
-    fn step_visual_odometry(&mut self, intrinsics: &CameraIntrinsics, timestamp_seconds: f64) {
-        let descriptor_start = Instant::now();
-        let descriptor_current = build_descriptor(
-            &self.last_tracks,
-            intrinsics.width,
-            intrinsics.height,
-            DescriptorSample::Refined,
-        );
-        let descriptor_elapsed = descriptor_start.elapsed().as_secs_f64() * 1000.0;
-        debug!("      [7] Descriptor: {:.2}ms", descriptor_elapsed);
+    fn step_visual_odometry(&mut self) {
+        let Some(intrinsics) = self.current_frame().map(|f| &f.intrinsics) else {
+            return;
+        };
 
-        let vo_start = Instant::now();
-        self.update_visual_odometry(timestamp_seconds, &descriptor_current);
-        let vo_elapsed = vo_start.elapsed().as_secs_f64() * 1000.0;
-        debug!("      [8] VO Monitor: {:.2}ms", vo_elapsed);
+        let Some(tracks) = self.current_frame().map(|f| &f.tracks) else {
+            return;
+        };
+        let Some(timestamp_seconds) = self.current_frame().map(|f| f.timestamp_seconds) else {
+            return;
+        };
+
+        let descriptor_current = {
+            let _span = debug_span!("build_descriptor").entered();
+            let descriptor_current = build_descriptor(
+                &tracks,
+                intrinsics.width,
+                intrinsics.height,
+                DescriptorSample::Refined,
+            );
+            debug!("      [7] Descriptor");
+            descriptor_current
+        };
+
+        {
+            let _span = debug_span!("update_vo_monitor").entered();
+            self.update_visual_odometry(timestamp_seconds, &descriptor_current);
+            debug!("      [8] VO Monitor");
+        }
     }
 
     // ========================================================================
@@ -950,55 +985,92 @@ impl ProcessingEngine {
 
     /// Run two-view initialization to bootstrap the map.
     /// Creates the initial map with gravity-aligned coordinate frame.
-    fn run_two_view_initialization(
-        &mut self,
-        tracks: &[TrackObservation],
-        prev_intrinsics: &CameraIntrinsics,
-        curr_intrinsics: &CameraIntrinsics,
-        _timestamp_seconds: f64,
-    ) {
-        let descriptor_start = Instant::now();
-        let descriptor_prev = build_descriptor(
-            tracks,
-            prev_intrinsics.width,
-            prev_intrinsics.height,
-            DescriptorSample::Initial,
-        );
-        let descriptor_elapsed = descriptor_start.elapsed().as_secs_f64() * 1000.0;
-        debug!("      Descriptor build (prev): {:.2}ms", descriptor_elapsed);
+    fn run_two_view_initialization(&mut self) {
+        let _span = debug_span!("two_view_initialization").entered();
 
-        let match_start = Instant::now();
-        let matches_indexed = build_feature_matches(tracks, prev_intrinsics, curr_intrinsics);
-        let matches: Vec<FeatureMatch> = matches_indexed
-            .iter()
-            .map(|(_, feature)| *feature)
-            .collect();
-        let match_elapsed = match_start.elapsed().as_secs_f64() * 1000.0;
-
-        debug!(
-            "      Feature matching: {:.2}ms ({} matches)",
-            match_elapsed,
-            matches.len()
-        );
-
-        if matches.len() < 8 {
-            debug!(
-                "Insufficient matches ({}) for two-view initialization",
-                matches.len()
-            );
-            return;
-        }
-
-        let two_view_start = Instant::now();
-        let Some(two_view) = self.two_view_initializer.estimate(&matches) else {
-            let two_view_elapsed = two_view_start.elapsed().as_secs_f64() * 1000.0;
-            warn!(target: "arbit_engine", "⚠️  Two-view FAILED: {:.2}ms - staying in TrackingPreInit", two_view_elapsed);
+        // Extract and clone data from frame window to avoid borrowing issues
+        let Some(curr_frame) = self.current_frame() else {
+            debug!("No current frame available for two-view initialization");
             return;
         };
 
-        let two_view_elapsed = two_view_start.elapsed().as_secs_f64() * 1000.0;
-        info!(target: "arbit_engine", "✅ Two-view SUCCESS: {:.2}ms, {} inliers, {} landmarks", 
-              two_view_elapsed, two_view.inliers.len(), two_view.landmarks.len());
+        // Try to find a good frame pair for initialization
+        let mut two_view_result: Option<(
+            TwoViewInitialization,
+            Vec<TrackObservation>,
+            Vec<(usize, FeatureMatch)>,
+            CameraIntrinsics,
+        )> = None;
+
+        for frame_i in 1..self.config.two_view_max_lookback {
+            let Some(older_frame) = self.frame_window.get(frame_i) else {
+                debug!("No older frame available for two-view initialization");
+                return;
+            };
+            let prev_intrinsics = &older_frame.intrinsics;
+            let curr_intrinsics = &curr_frame.intrinsics;
+
+            // Track features from older frame to current frame
+            let mut tracks = Vec::with_capacity(older_frame.seeds.len());
+            for seed in older_frame.seeds.iter() {
+                let observation = self.tracker.track_with_prior(
+                    &older_frame.pyramid,
+                    &curr_frame.pyramid,
+                    seed.position,
+                    None,
+                    Some(&older_frame.intrinsics),
+                );
+                tracks.push(observation);
+            }
+
+            // Build feature matches for geometric estimation
+            let matches_indexed = {
+                let _match_span = debug_span!("feature_matching").entered();
+                let result = build_feature_matches(&tracks, &prev_intrinsics, &curr_intrinsics);
+                debug!("      Feature matching: ({} matches)", result.len());
+                result
+            };
+
+            let matches: Vec<FeatureMatch> = matches_indexed
+                .iter()
+                .map(|(_, feature)| *feature)
+                .collect();
+
+            if matches.len() < 8 {
+                debug!(
+                    "Insufficient matches ({}) for two-view initialization",
+                    matches.len()
+                );
+                continue;
+            }
+
+            // Estimate essential matrix and decompose into R, t
+            let two_view = {
+                let _two_view_span = debug_span!("two_view_estimation").entered();
+                let result = self.two_view_initializer.estimate(&matches);
+                if let Some(ref tv) = result {
+                    info!(target: "arbit_engine", "✅ Two-view SUCCESS: {} inliers, {} landmarks", 
+                          tv.inliers.len(), tv.landmarks.len());
+                }
+                result
+            };
+
+            if let Some(two_view) = two_view {
+                // Success! Store the results and break from the loop
+                two_view_result =
+                    Some((two_view, tracks, matches_indexed, prev_intrinsics.clone()));
+                break;
+            } else {
+                warn!(target: "arbit_engine", "⚠️  Two-view FAILED - trying next frame pair");
+                continue;
+            }
+        }
+
+        // Check if we found a valid initialization
+        let Some((two_view, tracks, matches_indexed, prev_intrinsics)) = two_view_result else {
+            debug!("No valid frame pair found for two-view initialization");
+            return;
+        };
 
         // Apply gravity alignment if available
         let world_alignment = if let Some(gravity) = &self.last_gravity {
@@ -1020,16 +1092,30 @@ impl ProcessingEngine {
 
         info!(target: "arbit_engine", "   Initial pose set to T_cam_world (inverted gravity alignment)");
 
+        // NOW build descriptor (only after successful two-view initialization)
+        let descriptor_prev = {
+            let _span = debug_span!("build_descriptor").entered();
+            let result = build_descriptor(
+                &tracks,
+                prev_intrinsics.width,
+                prev_intrinsics.height,
+                DescriptorSample::Initial,
+            );
+            debug!("      Descriptor build");
+            result
+        };
+
         // Insert first keyframe at aligned origin
-        let keyframe_start = Instant::now();
-        self.try_insert_keyframe_with_landmarks(
-            &initial_pose,
-            descriptor_prev,
-            &scaled_two_view,
-            &matches_indexed,
-        );
-        let keyframe_elapsed = keyframe_start.elapsed().as_secs_f64() * 1000.0;
-        debug!("      Keyframe insertion: {:.2}ms", keyframe_elapsed);
+        {
+            let _span = debug_span!("keyframe_insertion").entered();
+            self.try_insert_keyframe_with_landmarks(
+                &initial_pose,
+                descriptor_prev,
+                &scaled_two_view,
+                &matches_indexed,
+            );
+            debug!("      Keyframe insertion");
+        }
 
         // Update pose for second frame
         self.current_pose = update_pose(&initial_pose, &scaled_two_view);
@@ -1047,7 +1133,16 @@ impl ProcessingEngine {
     }
 
     /// Run PnP-based tracking to estimate camera pose from map landmarks.
-    fn run_pnp_tracking(&mut self, tracks: &[TrackObservation], intrinsics: &CameraIntrinsics) {
+    fn run_pnp_tracking(&mut self) {
+        // Extract current frame data (clone to avoid borrowing issues)
+        let (tracks, intrinsics) = {
+            let Some(current) = self.current_frame() else {
+                debug!("No current frame available for PnP tracking");
+                return;
+            };
+            (current.tracks.clone(), current.intrinsics.clone())
+        };
+
         // CRITICAL FIX: Track indices change every frame when features are re-seeded!
         // We need to match by POSITION, not by track index.
 
@@ -1067,7 +1162,7 @@ impl ProcessingEngine {
                 continue;
             }
 
-            let normalized = normalize_pixel(track.refined, intrinsics);
+            let normalized = normalize_pixel(track.refined, &intrinsics);
 
             // Find the nearest landmark in the keyframe (spatial matching)
             let mut best_match: Option<(u64, f64)> = None;
@@ -1125,26 +1220,26 @@ impl ProcessingEngine {
             return;
         }
 
-        let pnp_start = Instant::now();
-        let Some(result) = self.pnp.estimate(&observations) else {
-            let pnp_elapsed = pnp_start.elapsed().as_secs_f64() * 1000.0;
-            warn!(
-                "      PnP estimation: {:.2}ms (FAILED), will try relocalization",
-                pnp_elapsed
-            );
+        let result = {
+            let _span = debug_span!("pnp_estimation").entered();
+            let result = self.pnp.estimate(&observations);
+            if result.is_none() {
+                warn!("      PnP estimation (FAILED), will try relocalization");
+            }
+            result
+        };
+
+        let Some(result) = result else {
             // Don't reset to TrackingPreInit - stay in Tracking mode
             // Let relocalization handle finding the camera in the map
             self.tracked_landmark_ids.clear();
             return;
         };
 
-        let pnp_elapsed = pnp_start.elapsed().as_secs_f64() * 1000.0;
-
         let pos = result.pose.translation.vector;
         info!(
             target: "arbit_engine",
-            "✅ PnP success: {:.2}ms, {} inliers, error: {:.4}, pose: [{:.3}, {:.3}, {:.3}]",
-            pnp_elapsed,
+            "✅ PnP success: {} inliers, error: {:.4}, pose: [{:.3}, {:.3}, {:.3}]",
             result.inliers.len(),
             result.average_reprojection_error,
             pos.x, pos.y, pos.z
@@ -1159,7 +1254,7 @@ impl ProcessingEngine {
         }
 
         // LOCAL MAPPING: Expand the map with new landmarks
-        self.expand_map_with_new_features(tracks, intrinsics);
+        self.expand_map_with_new_features(&tracks, &intrinsics);
     }
 
     // ========================================================================

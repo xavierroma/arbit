@@ -11,6 +11,7 @@ use arbit_engine::ProcessingEngine;
 use arbit_providers::{ArKitFrame, ArKitIntrinsics, CameraSample, IosCameraProvider, PixelFormat};
 use log::{info, warn};
 use nalgebra::{Matrix4, Translation3, UnitQuaternion, Vector3};
+use tracing_subscriber::{EnvFilter, fmt};
 
 struct CaptureContext {
     engine: ProcessingEngine,
@@ -419,9 +420,18 @@ fn context_to_handle(ctx: *mut CaptureContext) -> *mut ArbitCaptureContextHandle
 
 #[unsafe(no_mangle)]
 pub extern "C" fn arbit_init_logging() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
-        .filter_level(log::LevelFilter::Debug)
+    // Initialize tracing subscriber with span timing enabled
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .with_timer(fmt::time::uptime())
+        .with_level(true)
+        .with_ansi(false) // Disable ANSI colors for clean output
+        .with_span_events(fmt::format::FmtSpan::CLOSE) // Show span timing!
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug")),
+        )
         .init();
+
     info!("ARBIT logging initialized");
 }
 
