@@ -179,6 +179,7 @@ class ArbitTrackedPoint(Structure):
         ("residual", c_float),
         ("iterations", c_uint32),
         ("status", c_uint32),  # See TrackStatus enum
+        ("track_id", c_uint64),
     ]
 
 
@@ -308,4 +309,3 @@ class ImuState:
         if not self._native.has_rotation_prior:
             return None
         return np.degrees(self._native.rotation_prior_radians)
-

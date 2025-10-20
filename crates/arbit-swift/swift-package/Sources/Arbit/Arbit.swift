@@ -465,6 +465,7 @@ public struct TrackedPoint: Sendable {
     public var residual: Float
     public var iterations: UInt32
     public var status: TrackStatus
+    public var trackID: UInt64
 
     init(ffiValue: ArbitFFI.ArbitTrackedPoint) {
         initial = SIMD2(x: ffiValue.initial_x, y: ffiValue.initial_y)
@@ -472,6 +473,7 @@ public struct TrackedPoint: Sendable {
         residual = ffiValue.residual
         iterations = ffiValue.iterations
         status = TrackStatus(ffiValue: ffiValue.status)
+        trackID = ffiValue.track_id
     }
 }
 

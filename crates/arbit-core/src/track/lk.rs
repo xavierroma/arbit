@@ -80,6 +80,20 @@ pub struct TrackObservation {
     pub residual: f32,
     /// The outcome of the tracking: converged, diverged, or out of bounds (not in the image).
     pub outcome: TrackOutcome,
+    /// Forward-backward tracking error for health checks (pixels).
+    pub fb_err: f32,
+    /// Optional persistent track identifier. `None` for unpromoted seeds.
+    pub id: Option<u64>,
+    /// Normalized corner strength used when seeding.
+    pub score: f32,
+}
+
+impl TrackObservation {
+    /// Returns a stable identifier for this observation, falling back to an index-derived
+    /// value when a persistent track ID is not yet available.
+    pub fn identifier(&self, fallback_index: usize) -> u64 {
+        self.id.unwrap_or((fallback_index as u64) | (1u64 << 63))
+    }
 }
 
 pub struct Tracker {
@@ -139,6 +153,9 @@ impl Tracker {
                 iterations: 0,
                 residual: 0.0,
                 outcome: TrackOutcome::Diverged,
+                fb_err: 0.0,
+                id: None,
+                score: 0.0,
             };
         }
 
@@ -161,6 +178,9 @@ impl Tracker {
                         iterations: total_iterations,
                         residual,
                         outcome: TrackOutcome::Diverged,
+                        fb_err: 0.0,
+                        id: None,
+                        score: 0.0,
                     };
                 }
             }
@@ -172,6 +192,9 @@ impl Tracker {
             iterations: total_iterations,
             residual,
             outcome: TrackOutcome::Converged,
+            fb_err: 0.0,
+            id: None,
+            score: 0.0,
         };
 
         result

@@ -183,6 +183,7 @@ pub struct ArbitTrackedPoint {
     pub residual: f32,
     pub iterations: u32,
     pub status: ArbitTrackStatus,
+    pub track_id: u64,
 }
 
 #[repr(C)]
@@ -793,6 +794,7 @@ pub unsafe extern "C" fn arbit_get_tracked_points(
             residual: track.residual,
             iterations: track.iterations,
             status: track.outcome.into(),
+            track_id: track.id.unwrap_or(0),
         };
     }
     count

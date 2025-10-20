@@ -3,7 +3,10 @@ pub mod types;
 #[cfg(feature = "debug-server")]
 pub mod debug_server;
 
+mod track_manager;
+
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex};
 
 use arbit_core::img::{build_pyramid, ImageBuffer, Pyramid, PyramidLevel};
 use arbit_core::imu::{
@@ -30,6 +33,10 @@ use arbit_providers::CameraSample;
 use log::{debug, info, warn};
 use nalgebra::{Matrix3x4, Point3, Translation3, UnitQuaternion, Vector2, Vector3};
 use tracing::debug_span;
+
+use crate::track_manager::{
+    apply_score_threshold, drop_near_live, grid_cap, non_max_suppression, TrackConfig, TrackManager,
+};
 
 /// Processing constants grouped into a configuration structure.
 #[derive(Debug, Clone)]
@@ -166,14 +173,15 @@ pub struct ProcessingEngine {
     last_relocalization: Option<PnPResult>,
     last_keyframe_id: Option<u64>,
     // Track indexed landmarks for PnP
-    tracked_landmark_ids: HashMap<usize, u64>,
+    tracked_landmark_ids: HashMap<u64, u64>,
     // IMU preintegration components
     last_motion_stats: Option<MotionStats>,
     last_preintegrated: Option<PreintegratedImu>,
     preintegration_count: usize,
 
     seeder: FeatureSeeder,
-    tracker: Tracker,
+    tracker: Arc<Tracker>,
+    track_manager: Mutex<TrackManager<Tracker>>,
     two_view_initializer: TwoViewInitializer,
     gravity_estimator: GravityEstimator,
     vo_loop: VoLoop,
@@ -201,12 +209,16 @@ impl ProcessingEngine {
             min_inliers: config.relocalization_min_inliers,
         });
 
+        let tracker = Arc::new(Tracker::new(LucasKanadeConfig::default()));
+        let track_manager = TrackManager::new(tracker.clone(), TrackConfig::default());
+
         let mut engine = Self {
             config,
             tracking_state: TrackingState::Uninitialized,
             frame_window: VecDeque::new(),
             seeder: FeatureSeeder::new(FeatureGridConfig::default()),
-            tracker: Tracker::new(LucasKanadeConfig::default()),
+            tracker,
+            track_manager: Mutex::new(track_manager),
             last_two_view: None,
             two_view_initializer: TwoViewInitializer::new(TwoViewInitializationParams::default()),
             trajectory: vec![Vector3::new(0.0, 0.0, 0.0)],
@@ -450,6 +462,8 @@ impl ProcessingEngine {
             &prev_frame.pyramid,
             &frame_data.pyramid,
             &frame_data.intrinsics,
+            prev_frame.frame_index,
+            frame_data.frame_index,
         );
         frame_data.tracks = tracks;
         self.frame_window.push_front(frame_data);
@@ -867,50 +881,81 @@ impl ProcessingEngine {
         pyramid
     }
 
-    /// Step 4 & 5: Seed new features and track them across frames.
+    /// Step 4 & 5: Advance persistent tracks and promote new seeds.
     fn step_seed_and_track_features(
         &self,
         prev_pyramid: &Pyramid,
         curr_pyramid: &Pyramid,
         intrinsics: &CameraIntrinsics,
+        frame_prev: u64,
+        frame_curr: u64,
     ) -> Vec<TrackObservation> {
-        // Step 4: Seed features
-        let seeds = {
+        let mut manager = self.track_manager.lock().expect("track manager poisoned");
+
+        // Step 4a: advance existing live tracks
+        let (stats, mut advanced) = manager.advance_alive(
+            prev_pyramid,
+            curr_pyramid,
+            intrinsics,
+            frame_prev,
+            frame_curr,
+        );
+        debug!(
+            "      [4] Tracking: advanced={}, killed={}, fb_fail={}, res_fail={}",
+            stats.advanced, stats.killed, stats.fb_fail, stats.res_fail
+        );
+
+        if !manager.need_more_features() {
+            return advanced;
+        }
+
+        // Step 4b: detect new candidates on the previous frame
+        let mut seeds = {
             let _span = debug_span!("seed_features").entered();
-            let seeds = self.seeder.seed(&prev_pyramid.levels()[0]);
-            debug!("      [4] Seeding: ({} seeds)", seeds.len());
-            seeds
+            let raw = self.seeder.seed(&prev_pyramid.levels()[0]);
+            debug!("      [4] Seeding: ({} seeds)", raw.len());
+            raw
         };
 
-        // Step 5: Track features
-        let tracks = {
-            let _span = debug_span!("track_features").entered();
-            let mut tracks = Vec::with_capacity(seeds.len());
-            for seed in seeds.iter() {
-                let observation = self.tracker.track_with_prior(
-                    prev_pyramid,
+        seeds = apply_score_threshold(seeds, manager.config.score_th);
+        seeds = non_max_suppression(seeds, manager.config.nms_radius);
+        seeds = grid_cap(seeds, manager.config.grid_cell, manager.config.per_cell_cap);
+        let live_prev = manager.live_points_at(frame_prev);
+        seeds = drop_near_live(seeds, live_prev, manager.config.r_detect);
+
+        // Step 5: track candidates forward and evaluate quality
+        let mut candidates = Vec::with_capacity(seeds.len());
+        for seed in seeds.iter() {
+            let mut observation = self.tracker.track_with_prior(
+                prev_pyramid,
+                curr_pyramid,
+                seed.position,
+                None,
+                Some(intrinsics),
+            );
+
+            if matches!(observation.outcome, TrackOutcome::Converged) {
+                let backward = self.tracker.track_with_prior(
                     curr_pyramid,
-                    seed.position,
+                    prev_pyramid,
+                    observation.refined,
                     None,
                     Some(intrinsics),
                 );
-                tracks.push(observation);
+                observation.fb_err = (backward.refined - seed.position).norm();
+            } else {
+                observation.fb_err = f32::MAX;
             }
 
-            let converged_tracks = tracks
-                .iter()
-                .filter(|t| matches!(t.outcome, TrackOutcome::Converged))
-                .count();
-            debug!(
-                "      [5] Tracking: ({} tracks, {} converged)",
-                tracks.len(),
-                converged_tracks
-            );
+            observation.score = seed.score;
+            observation.id = None;
+            candidates.push(observation);
+        }
 
-            tracks
-        };
+        manager.promote(&mut candidates, frame_prev, frame_curr);
 
-        tracks
+        advanced.extend(candidates.into_iter().filter(|c| c.id.is_some()));
+        advanced
     }
 
     /// Step 6: Estimate camera pose using initialization or PnP tracking.
@@ -998,7 +1043,7 @@ impl ProcessingEngine {
         let mut two_view_result: Option<(
             TwoViewInitialization,
             Vec<TrackObservation>,
-            Vec<(usize, FeatureMatch)>,
+            Vec<(u64, FeatureMatch)>,
             CameraIntrinsics,
         )> = None;
 
@@ -1157,10 +1202,14 @@ impl ProcessingEngine {
             return;
         };
 
-        for (track_idx, track) in tracks.iter().enumerate() {
+        for track in tracks.iter() {
             if !matches!(track.outcome, TrackOutcome::Converged) {
                 continue;
             }
+
+            let Some(track_id) = track.id else {
+                continue;
+            };
 
             let normalized = normalize_pixel(track.refined, &intrinsics);
 
@@ -1192,7 +1241,7 @@ impl ProcessingEngine {
                         world_point: landmark.position,
                         normalized_image: normalized,
                     });
-                    new_tracked_mapping.insert(track_idx, landmark_id);
+                    new_tracked_mapping.insert(track_id, landmark_id);
                 }
             }
         }
@@ -1277,13 +1326,17 @@ impl ProcessingEngine {
         let mut new_landmarks_added = 0;
         let mut new_landmark_mappings = Vec::new();
 
-        for (track_idx, track) in tracks.iter().enumerate() {
+        for track in tracks.iter() {
             if !matches!(track.outcome, TrackOutcome::Converged) {
                 continue;
             }
 
+            let Some(track_id) = track.id else {
+                continue;
+            };
+
             // Skip if this track already has a landmark
-            if self.tracked_landmark_ids.contains_key(&track_idx) {
+            if self.tracked_landmark_ids.contains_key(&track_id) {
                 continue;
             }
 
@@ -1302,15 +1355,15 @@ impl ProcessingEngine {
                 if depth > 0.1 && depth < 100.0 {
                     // Add to map
                     let landmark_id = self.map.add_landmark(world_point);
-                    new_landmark_mappings.push((track_idx, landmark_id));
+                    new_landmark_mappings.push((track_id, landmark_id));
                     new_landmarks_added += 1;
                 }
             }
         }
 
         // Update tracked landmark IDs
-        for (track_idx, landmark_id) in new_landmark_mappings {
-            self.tracked_landmark_ids.insert(track_idx, landmark_id);
+        for (track_id, landmark_id) in new_landmark_mappings {
+            self.tracked_landmark_ids.insert(track_id, landmark_id);
         }
 
         if new_landmarks_added > 0 {
@@ -1346,12 +1399,16 @@ impl ProcessingEngine {
         // Collect features that have known landmark IDs
         let mut features = Vec::new();
 
-        for (track_idx, track) in tracks.iter().enumerate() {
+        for track in tracks.iter() {
             if !matches!(track.outcome, TrackOutcome::Converged) {
                 continue;
             }
 
-            if let Some(&landmark_id) = self.tracked_landmark_ids.get(&track_idx) {
+            let Some(track_id) = track.id else {
+                continue;
+            };
+
+            if let Some(&landmark_id) = self.tracked_landmark_ids.get(&track_id) {
                 if let Some(landmark) = self.map.landmark(landmark_id) {
                     let normalized = Vector2::new(
                         normalize_pixel(track.refined, intrinsics).x as f32,
@@ -1395,7 +1452,7 @@ impl ProcessingEngine {
         prev_pose: &TransformSE3,
         descriptor_info: DescriptorInfo,
         two_view: &TwoViewInitialization,
-        matches_indexed: &[(usize, FeatureMatch)],
+        matches_indexed: &[(u64, FeatureMatch)],
     ) {
         if !self.map.should_insert_keyframe(prev_pose) {
             debug!("Keyframe gating rejected pose insertion");
@@ -1426,23 +1483,25 @@ impl ProcessingEngine {
             return;
         }
 
-        let normalized_lookup: HashMap<usize, Vector2<f32>> =
-            normalized_points.into_iter().collect();
-        let track_lookup: Vec<usize> = matches_indexed.iter().map(|(idx, _)| *idx).collect();
+        let normalized_lookup: HashMap<u64, Vector2<f32>> = normalized_points.into_iter().collect();
+        let match_to_track: Vec<u64> = matches_indexed
+            .iter()
+            .map(|(track_id, _)| *track_id)
+            .collect();
 
         let mut features = Vec::new();
-        let mut track_to_match: HashMap<usize, usize> = HashMap::new();
+        let mut track_to_match: HashMap<u64, usize> = HashMap::new();
 
         for (match_idx, landmark) in &two_view.landmarks {
-            if let Some(track_idx) = track_lookup.get(*match_idx) {
-                if let Some(normalized) = normalized_lookup.get(track_idx) {
+            if let Some(&track_id) = match_to_track.get(*match_idx) {
+                if let Some(normalized) = normalized_lookup.get(&track_id) {
                     // Two-view landmarks are in Frame 0's camera space
                     // prev_pose = T_cam_world (after Bug #1 fix)
                     // To transform camera → world: use inverse
                     // landmark_world = T_world_cam * landmark_cam
                     let world_point = prev_pose.inverse().transform_point(landmark);
                     features.push((*normalized, world_point));
-                    track_to_match.insert(*track_idx, *match_idx);
+                    track_to_match.insert(track_id, *match_idx);
                 }
             }
         }
@@ -1482,9 +1541,9 @@ impl ProcessingEngine {
 
             // Update landmark tracking: map track indices to landmark IDs
             self.tracked_landmark_ids.clear();
-            for (feature_idx, (track_idx, _match_idx)) in track_to_match.iter().enumerate() {
+            for (feature_idx, (track_id, _match_idx)) in track_to_match.iter().enumerate() {
                 let landmark_id = starting_landmark_id + feature_idx as u64;
-                self.tracked_landmark_ids.insert(*track_idx, landmark_id);
+                self.tracked_landmark_ids.insert(*track_id, landmark_id);
             }
 
             info!(
@@ -1574,7 +1633,7 @@ impl ProcessingEngine {
     fn build_pnp_observations(
         &self,
         keyframe: &KeyframeData,
-        points: &[(usize, Vector2<f32>)],
+        points: &[(u64, Vector2<f32>)],
     ) -> Vec<PnPObservation> {
         let mut used = HashSet::new();
         let mut observations = Vec::new();
@@ -1626,7 +1685,7 @@ fn build_feature_matches(
     observations: &[TrackObservation],
     prev_intrinsics: &CameraIntrinsics,
     curr_intrinsics: &CameraIntrinsics,
-) -> Vec<(usize, FeatureMatch)> {
+) -> Vec<(u64, FeatureMatch)> {
     observations
         .iter()
         .enumerate()
@@ -1634,8 +1693,9 @@ fn build_feature_matches(
             if !matches!(obs.outcome, TrackOutcome::Converged) {
                 return None;
             }
+            let track_id = obs.identifier(index);
             Some((
-                index,
+                track_id,
                 FeatureMatch {
                     normalized_a: normalize_pixel(obs.initial, prev_intrinsics),
                     normalized_b: normalize_pixel(obs.refined, curr_intrinsics),

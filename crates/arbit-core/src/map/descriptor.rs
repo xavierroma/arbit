@@ -12,7 +12,7 @@ pub enum DescriptorSample {
 #[derive(Debug, Clone)]
 pub struct DescriptorInfo {
     pub descriptor: KeyframeDescriptor,
-    pub normalized_points: Vec<(usize, Vector2<f32>)>,
+    pub normalized_points: Vec<(u64, Vector2<f32>)>,
     pub total_tracks: usize,
     pub converged_tracks: usize,
     pub average_residual: f32,
@@ -58,7 +58,8 @@ pub fn build_descriptor(
         );
         let cell = cell_for_normalized(&normalized);
         histogram[cell] += 1.0;
-        normalized_points.push((index, normalized));
+        let track_id = track.identifier(index);
+        normalized_points.push((track_id, normalized));
         residual_sum += track.residual;
     }
 
@@ -109,6 +110,9 @@ mod tests {
             iterations: 5,
             residual,
             outcome: TrackOutcome::Converged,
+            fb_err: 0.0,
+            id: Some(1),
+            score: 0.0,
         }
     }
 
