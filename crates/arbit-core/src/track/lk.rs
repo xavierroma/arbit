@@ -53,9 +53,9 @@ pub struct LucasKanadeConfig {
 impl Default for LucasKanadeConfig {
     fn default() -> Self {
         Self {
-            window_radius: 4,
-            max_iterations: 20,
-            epsilon: 0.01,
+            window_radius: 10,
+            max_iterations: 30,
+            epsilon: 0.03162, // ε² ≈ 1e-3
         }
     }
 }

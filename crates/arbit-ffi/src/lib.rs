@@ -6,6 +6,8 @@ use std::time::Duration;
 use arbit_core::math::CameraIntrinsics;
 use arbit_core::math::se3::TransformSE3;
 use arbit_core::time::FrameTimestamps;
+use arbit_core::track::FastSeeder;
+use arbit_core::track::FeatureSeederTrait;
 use arbit_core::track::TrackOutcome;
 use arbit_engine::ProcessingEngine;
 use arbit_providers::{ArKitFrame, ArKitIntrinsics, CameraSample, IosCameraProvider, PixelFormat};
@@ -13,8 +15,8 @@ use log::{info, warn};
 use nalgebra::{Matrix4, Translation3, UnitQuaternion, Vector3};
 use tracing_subscriber::{EnvFilter, fmt};
 
-struct CaptureContext {
-    engine: ProcessingEngine,
+struct CaptureContext<S: FeatureSeederTrait = FastSeeder> {
+    engine: ProcessingEngine<S>,
     provider: IosCameraProvider,
 }
 
@@ -825,178 +827,6 @@ pub unsafe extern "C" fn arbit_get_trajectory(
     count
 }
 
-/// Lists all anchor IDs
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arbit_list_anchors(
-    handle: *mut ArbitCaptureContextHandle,
-    out_ids: *mut u64,
-    max_ids: usize,
-) -> usize {
-    if handle.is_null() || out_ids.is_null() || max_ids == 0 {
-        return 0;
-    }
-
-    let context = handle_to_context(handle);
-    let mut ids = context.engine.anchor_ids();
-    ids.sort_unstable();
-    let count = ids.len().min(max_ids);
-    let dest = unsafe { slice::from_raw_parts_mut(out_ids, count) };
-    for (dst, id) in dest.iter_mut().zip(ids.iter()) {
-        *dst = *id;
-    }
-    count
-}
-
-/// Creates a new anchor
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arbit_create_anchor(
-    handle: *mut ArbitCaptureContextHandle,
-    pose: *const ArbitTransform,
-    out_id: *mut u64,
-) -> bool {
-    if handle.is_null() || pose.is_null() {
-        return false;
-    }
-
-    let context = handle_to_context(handle);
-    let pose = unsafe { &*pose };
-    let Some(transform) = transform_from_ffi(pose) else {
-        return false;
-    };
-
-    let id = context.engine.create_anchor(transform);
-    if !out_id.is_null() {
-        unsafe {
-            *out_id = id;
-        }
-    }
-    true
-}
-
-/// Gets an anchor pose
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arbit_get_anchor(
-    handle: *mut ArbitCaptureContextHandle,
-    anchor_id: u64,
-    out_pose: *mut ArbitTransform,
-) -> bool {
-    if handle.is_null() || out_pose.is_null() {
-        return false;
-    }
-
-    let context = handle_to_context(handle);
-    let Some(anchor) = context.engine.resolve_anchor(anchor_id) else {
-        return false;
-    };
-
-    let pose = transform_to_ffi(&anchor.pose);
-    unsafe {
-        *out_pose = pose;
-    }
-    true
-}
-
-/// Updates an anchor pose
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arbit_update_anchor(
-    handle: *mut ArbitCaptureContextHandle,
-    anchor_id: u64,
-    pose: *const ArbitTransform,
-) -> bool {
-    if handle.is_null() || pose.is_null() {
-        return false;
-    }
-
-    let context = handle_to_context(handle);
-    let pose = unsafe { &*pose };
-    let Some(transform) = transform_from_ffi(pose) else {
-        return false;
-    };
-
-    context.engine.update_anchor(anchor_id, transform)
-}
-
-/// Removes an anchor
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arbit_remove_anchor(
-    handle: *mut ArbitCaptureContextHandle,
-    anchor_id: u64,
-) -> bool {
-    if handle.is_null() {
-        return false;
-    }
-
-    let context = handle_to_context(handle);
-    context.engine.remove_anchor(anchor_id)
-}
-
-/// Places an anchor by raycasting from a screen point
-/// normalized_u, normalized_v should be in range [0, 1]
-/// depth is in meters
-/// Returns the new anchor ID or 0 on failure
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arbit_place_anchor_at_screen_point(
-    handle: *mut ArbitCaptureContextHandle,
-    normalized_u: f64,
-    normalized_v: f64,
-    depth: f64,
-    out_anchor_id: *mut u64,
-) -> bool {
-    if handle.is_null() {
-        return false;
-    }
-
-    let context = handle_to_context(handle);
-
-    if let Some(anchor_id) =
-        context
-            .engine
-            .place_anchor_at_screen_point(normalized_u, normalized_v, depth)
-    {
-        if !out_anchor_id.is_null() {
-            unsafe {
-                *out_anchor_id = anchor_id;
-            }
-        }
-        true
-    } else {
-        false
-    }
-}
-
-/// Gets all visible anchors in the current camera frame
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arbit_get_visible_anchors(
-    handle: *mut ArbitCaptureContextHandle,
-    out_anchors: *mut ArbitProjectedAnchor,
-    max_anchors: usize,
-) -> usize {
-    if handle.is_null() || out_anchors.is_null() || max_anchors == 0 {
-        return 0;
-    }
-
-    let context = handle_to_context(handle);
-    let visible = context.engine.get_visible_anchors();
-    let count = visible.len().min(max_anchors);
-    let dest = unsafe { slice::from_raw_parts_mut(out_anchors, count) };
-
-    for (dst, projected) in dest.iter_mut().zip(visible.iter()) {
-        *dst = ArbitProjectedAnchor {
-            anchor_id: projected.anchor.id,
-            pose: transform_to_ffi(&projected.anchor.pose),
-            created_from_keyframe: projected.anchor.created_from_keyframe.unwrap_or(0),
-            has_keyframe: projected.anchor.created_from_keyframe.is_some(),
-            normalized_u: projected.normalized_u,
-            normalized_v: projected.normalized_v,
-            pixel_x: projected.pixel_x,
-            pixel_y: projected.pixel_y,
-            depth: projected.depth,
-        };
-    }
-
-    count
-}
-
 /// Gets all visible landmarks in the current camera frame (for debugging)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn arbit_get_visible_landmarks(
@@ -1200,92 +1030,6 @@ mod tests {
     }
 
     #[test]
-    fn anchors_round_trip_via_ffi() {
-        let handle = arbit_context_create();
-        assert!(!handle.is_null());
-
-        // Check initial state
-        let mut state = ArbitFrameState::default();
-        unsafe {
-            assert!(arbit_get_frame_state(handle, &mut state as *mut _));
-        }
-        assert_eq!(state.anchor_count, 0);
-
-        let identity = ArbitTransform {
-            elements: [
-                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-            ],
-        };
-        let mut anchor_id = 0u64;
-        unsafe {
-            assert!(arbit_create_anchor(
-                handle,
-                &identity as *const _,
-                &mut anchor_id as *mut _
-            ));
-        }
-
-        // Check state after creating anchor
-        unsafe {
-            assert!(arbit_get_frame_state(handle, &mut state as *mut _));
-        }
-        assert_eq!(state.anchor_count, 1);
-
-        let mut resolved = ArbitTransform::default();
-        unsafe {
-            assert!(arbit_get_anchor(handle, anchor_id, &mut resolved as *mut _));
-        }
-        assert_eq!(resolved.elements, identity.elements);
-
-        unsafe {
-            arbit_context_destroy(handle);
-        }
-    }
-
-    #[test]
-    fn map_save_and_load_round_trip() {
-        let handle = arbit_context_create();
-        assert!(!handle.is_null());
-
-        let identity = ArbitTransform {
-            elements: [
-                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-            ],
-        };
-        let mut anchor_id = 0u64;
-        unsafe {
-            assert!(arbit_create_anchor(
-                handle,
-                &identity as *const _,
-                &mut anchor_id as *mut _
-            ));
-        }
-
-        let mut required: usize = 0;
-        unsafe {
-            assert!(!arbit_save_map(handle, ptr::null_mut(), 0, &mut required));
-        }
-        assert!(required > 0);
-
-        let mut buffer = vec![0u8; required];
-        let mut written = 0usize;
-        let saved =
-            unsafe { arbit_save_map(handle, buffer.as_mut_ptr(), buffer.len(), &mut written) };
-        assert!(saved);
-        assert_eq!(written, buffer.len());
-
-        let new_handle = arbit_context_create();
-        assert!(!new_handle.is_null());
-        let loaded = unsafe { arbit_load_map(new_handle, buffer.as_ptr(), buffer.len()) };
-        assert!(loaded);
-
-        unsafe {
-            arbit_context_destroy(handle);
-            arbit_context_destroy(new_handle);
-        }
-    }
-
-    #[test]
     fn simplified_api_lifecycle() {
         // Test new simplified API names
         let handle = arbit_context_create();
@@ -1336,49 +1080,6 @@ mod tests {
         assert!(!imu_state.has_motion_state);
         assert!(!imu_state.has_gravity);
         assert_eq!(imu_state.preintegration_count, 0);
-
-        unsafe {
-            arbit_context_destroy(handle);
-        }
-    }
-
-    #[test]
-    fn simplified_api_anchor_operations() {
-        let handle = arbit_context_create();
-        assert!(!handle.is_null());
-
-        let identity = ArbitTransform {
-            elements: [
-                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-            ],
-        };
-
-        // Test simplified anchor creation
-        let mut anchor_id = 0u64;
-        unsafe {
-            assert!(arbit_create_anchor(
-                handle,
-                &identity as *const _,
-                &mut anchor_id as *mut _
-            ));
-        }
-
-        // Test simplified anchor retrieval
-        let mut retrieved = ArbitTransform::default();
-        unsafe {
-            assert!(arbit_get_anchor(
-                handle,
-                anchor_id,
-                &mut retrieved as *mut _
-            ));
-        }
-        assert_eq!(retrieved.elements, identity.elements);
-
-        // Test simplified list anchors
-        let mut ids = [0u64; 16];
-        let count = unsafe { arbit_list_anchors(handle, ids.as_mut_ptr(), ids.len()) };
-        assert_eq!(count, 1);
-        assert_eq!(ids[0], anchor_id);
 
         unsafe {
             arbit_context_destroy(handle);

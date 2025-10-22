@@ -25,8 +25,8 @@ use arbit_core::math::CameraIntrinsics;
 use arbit_core::relocalize::{PnPObservation, PnPRansac, PnPRansacParams, PnPResult};
 use arbit_core::time::FrameTimestamps;
 use arbit_core::track::{
-    FeatureGridConfig, FeatureSeed, FeatureSeeder, LucasKanadeConfig, TrackObservation,
-    TrackOutcome, Tracker,
+    FastSeeder, FastSeederConfig, FeatureGridConfig, FeatureSeed, FeatureSeederTrait,
+    LucasKanadeConfig, TrackObservation, TrackOutcome, Tracker,
 };
 use arbit_core::vo::{FrameObservation, VoLoop, VoLoopConfig, VoStatus};
 use arbit_providers::CameraSample;
@@ -58,7 +58,7 @@ pub struct EngineConfig {
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
-            pyramid_octaves: 3,
+            pyramid_octaves: 4,
             baseline_scale: 0.05,
             max_trajectory_points: 2048,
             min_keyframe_landmarks: 12,
@@ -154,7 +154,7 @@ pub struct FrameData {
     pub preintegrated_imu: Option<PreintegratedImu>,
 }
 /// Processing engine that encapsulates the full camera/IMU pipeline.
-pub struct ProcessingEngine {
+pub struct ProcessingEngine<S: FeatureSeederTrait> {
     config: EngineConfig,
     tracking_state: TrackingState,
 
@@ -179,7 +179,7 @@ pub struct ProcessingEngine {
     last_preintegrated: Option<PreintegratedImu>,
     preintegration_count: usize,
 
-    seeder: FeatureSeeder,
+    seeder: S,
     tracker: Arc<Tracker>,
     track_manager: Mutex<TrackManager<Tracker>>,
     two_view_initializer: TwoViewInitializer,
@@ -191,7 +191,7 @@ pub struct ProcessingEngine {
     accel_bias_estimator: Option<AccelBiasEstimator>,
 }
 
-impl ProcessingEngine {
+impl ProcessingEngine<FastSeeder> {
     // ========================================================================
     // CONSTRUCTION & CONFIGURATION
     // ========================================================================
@@ -216,7 +216,7 @@ impl ProcessingEngine {
             config,
             tracking_state: TrackingState::Uninitialized,
             frame_window: VecDeque::new(),
-            seeder: FeatureSeeder::new(FeatureGridConfig::default()),
+            seeder: FastSeeder::new(FastSeederConfig::default()),
             tracker,
             track_manager: Mutex::new(track_manager),
             last_two_view: None,
@@ -246,7 +246,9 @@ impl ProcessingEngine {
 
         engine
     }
+}
 
+impl<S: FeatureSeederTrait> ProcessingEngine<S> {
     // ========================================================================
     // IMU PREINTEGRATION & MOTION TRACKING
     // ========================================================================
@@ -450,7 +452,7 @@ impl ProcessingEngine {
             preintegrated_imu: _preintegrated,
         };
 
-        let Some(prev_frame) = self.prev_frame() else {
+        let Some(prev_frame) = self.current_frame() else {
             warn!("No previous frame found");
             self.frame_window.push_front(frame_data);
             self.frame_index += 1;
@@ -476,17 +478,6 @@ impl ProcessingEngine {
         self.step_estimate_pose();
         // Step 7 & 8: Build descriptor and update visual odometry
         // self.step_visual_odometry(intrinsics, timestamp_seconds);
-    }
-
-    /// Ingest an accelerometer sample (legacy method - prefer ingest_imu_sample).
-    pub fn ingest_accelerometer(&mut self, ax: f64, ay: f64, az: f64, dt: f64) {
-        let dt = if dt.is_finite() && dt > 0.0 {
-            dt
-        } else {
-            1.0 / 120.0
-        };
-        let accel = Vector3::new(ax, ay, az);
-        self.last_gravity = self.gravity_estimator.update(accel, dt);
     }
 
     // ========================================================================
@@ -566,106 +557,6 @@ impl ProcessingEngine {
     /// Current estimated camera pose.
     pub fn current_pose(&self) -> &TransformSE3 {
         &self.current_pose
-    }
-
-    // ========================================================================
-    // ANCHOR & MAP MANAGEMENT
-    // ========================================================================
-
-    /// Snapshot of anchor identifiers currently tracked.
-    pub fn anchor_ids(&self) -> Vec<u64> {
-        self.map.anchors().map(|anchor| anchor.id).collect()
-    }
-
-    /// Resolve an anchor by identifier.
-    pub fn resolve_anchor(&self, anchor_id: u64) -> Option<&Anchor> {
-        self.map.resolve_anchor(anchor_id)
-    }
-
-    /// Update an anchor pose.
-    pub fn update_anchor(&mut self, anchor_id: u64, pose: TransformSE3) -> bool {
-        self.map.update_anchor_pose(anchor_id, pose)
-    }
-
-    /// Create a new anchor and return its identifier.
-    pub fn create_anchor(&mut self, pose: TransformSE3) -> u64 {
-        let hint = self.last_keyframe_id;
-        self.map.create_anchor(pose, hint)
-    }
-
-    /// Remove an anchor by identifier. Returns true if the anchor existed and was removed.
-    pub fn remove_anchor(&mut self, anchor_id: u64) -> bool {
-        self.map.remove_anchor(anchor_id)
-    }
-
-    /// Place an anchor at a screen position by raycasting into the scene.
-    /// Returns the anchor ID if successful.
-    ///
-    /// - `normalized_u`, `normalized_v`: Normalized image coordinates in range [0, 1]
-    /// - `depth`: Distance along the ray in meters (default: 1.0)
-    pub fn place_anchor_at_screen_point(
-        &mut self,
-        normalized_u: f64,
-        normalized_v: f64,
-        depth: f64,
-    ) -> Option<u64> {
-        let Some(intrinsics) = self.current_frame().map(|f| &f.intrinsics) else {
-            warn!("No intrinsics available");
-            return None;
-        };
-
-        // Convert normalized [0,1] to pixel coordinates
-        let pixel_x = normalized_u * intrinsics.width as f64;
-        let pixel_y = normalized_v * intrinsics.height as f64;
-
-        // Back-project to normalized camera coordinates (ray direction)
-        let ndc_x = (pixel_x - intrinsics.cx) / intrinsics.fx;
-        let ndc_y = (pixel_y - intrinsics.cy) / intrinsics.fy;
-
-        // Ray direction in camera space (normalized)
-        let ray_camera = Vector3::new(ndc_x, ndc_y, 1.0).normalize();
-
-        // Transform ray from camera space to world space using current pose
-        let rotation = self.current_pose.rotation.to_rotation_matrix();
-        let ray_world = rotation * ray_camera;
-
-        // Calculate anchor position: camera position + ray * depth
-        let camera_position = self.current_pose.translation.vector;
-        let anchor_position = camera_position + ray_world * depth;
-
-        // Create pose at anchor position (identity rotation)
-        let anchor_pose = TransformSE3::from_parts(
-            Translation3::from(anchor_position),
-            UnitQuaternion::identity(),
-        );
-
-        let anchor_id = self.create_anchor(anchor_pose);
-        info!(
-            target: "arbit_engine",
-            "Placed anchor #{} at world position [{:.2}, {:.2}, {:.2}] (depth: {:.2}m)",
-            anchor_id,
-            anchor_position.x,
-            anchor_position.y,
-            anchor_position.z,
-            depth
-        );
-
-        Some(anchor_id)
-    }
-
-    /// Get all anchors that are visible in the current camera frame with their projected coordinates.
-    /// Returns anchors that are:
-    /// - In front of the camera (positive depth)
-    /// - Within the frame bounds
-    pub fn get_visible_anchors(&self) -> Vec<ProjectedAnchor> {
-        let Some(intrinsics) = self.current_frame().map(|f| &f.intrinsics) else {
-            return Vec::new();
-        };
-
-        self.map
-            .anchors()
-            .filter_map(|anchor| self.project_anchor_internal(anchor, intrinsics))
-            .collect()
     }
 
     /// Get all landmarks projected into the current camera frame for debugging.
@@ -901,27 +792,28 @@ impl ProcessingEngine {
             frame_curr,
         );
         debug!(
-            "      [4] Tracking: advanced={}, killed={}, fb_fail={}, res_fail={}",
-            stats.advanced, stats.killed, stats.fb_fail, stats.res_fail
+            "      [4] Tracking: advanced={}, killed={} (no_converge={}, fb_fail={}, res_fail={})",
+            stats.advanced, stats.killed, stats.no_converge, stats.fb_fail, stats.res_fail
         );
 
         if !manager.need_more_features() {
+            debug!("      [4] No more features needed");
             return advanced;
         }
+
+        debug!("      [4] Detecting new candidates");
 
         // Step 4b: detect new candidates on the previous frame
         let mut seeds = {
             let _span = debug_span!("seed_features").entered();
             let raw = self.seeder.seed(&prev_pyramid.levels()[0]);
-            debug!("      [4] Seeding: ({} seeds)", raw.len());
+            debug!("      [4] Seeded ({} seeds)", raw.len());
             raw
         };
 
-        seeds = apply_score_threshold(seeds, manager.config.score_th);
-        seeds = non_max_suppression(seeds, manager.config.nms_radius);
-        seeds = grid_cap(seeds, manager.config.grid_cell, manager.config.per_cell_cap);
         let live_prev = manager.live_points_at(frame_prev);
         seeds = drop_near_live(seeds, live_prev, manager.config.r_detect);
+        debug!("      [4] Dropped near live: remaining {}", seeds.len());
 
         // Step 5: track candidates forward and evaluate quality
         let mut candidates = Vec::with_capacity(seeds.len());
@@ -1676,7 +1568,6 @@ impl ProcessingEngine {
             .collect()
     }
 }
-
 // ============================================================================
 // STANDALONE HELPER FUNCTIONS
 // ============================================================================
@@ -1842,7 +1733,7 @@ fn align_world_to_gravity(gravity: &GravityEstimate) -> TransformSE3 {
     TransformSE3::from_parts(Translation3::identity(), rotation.into())
 }
 
-impl Default for ProcessingEngine {
+impl Default for ProcessingEngine<FastSeeder> {
     fn default() -> Self {
         Self::new()
     }
@@ -1928,13 +1819,5 @@ mod tests {
         assert_eq!(sample.intrinsics.width, 640);
         assert!(!engine.pyramid_levels().is_empty());
         assert!(engine.trajectory().len() >= 1);
-    }
-
-    #[test]
-    fn save_and_load_map_round_trip() {
-        let mut engine = ProcessingEngine::new();
-        engine.create_anchor(TransformSE3::identity());
-        let data = engine.save_map().expect("save");
-        assert!(engine.load_map(&data).is_ok());
     }
 }

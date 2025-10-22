@@ -4,4 +4,7 @@ pub mod seed;
 
 pub use health::{ForwardBackwardMetrics, TrackHealth};
 pub use lk::{LucasKanadeConfig, TrackObservation, TrackOutcome, Tracker};
-pub use seed::{FeatureGridConfig, FeatureSeed, FeatureSeeder};
+pub use seed::{
+    FastDetectorConfig, FastDetectorType, FastSeeder, FastSeederConfig, FeatureGridConfig,
+    FeatureSeed, FeatureSeederTrait, ShiTomasiGridConfig, ShiTomasiSeeder,
+};

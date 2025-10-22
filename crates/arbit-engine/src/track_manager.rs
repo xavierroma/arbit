@@ -53,8 +53,8 @@ impl Default for TrackConfig {
             per_cell_cap: 3,
             r_detect: 10.0,
             r_promote: 6.0,
-            fb_th: 0.75,
-            res_th: 0.75,
+            fb_th: 1.2,
+            res_th: 1.0,
             target_tracks: 800,
             score_th: 0.8,
         }
@@ -65,6 +65,7 @@ impl Default for TrackConfig {
 pub struct AdvanceStats {
     pub advanced: usize,
     pub killed: usize,
+    pub no_converge: usize,
     pub fb_fail: usize,
     pub res_fail: usize,
 }
@@ -125,6 +126,12 @@ impl<T: FlowTracker> TrackManager<T> {
             if !matches!(forward.outcome, TrackOutcome::Converged) {
                 track.alive = false;
                 stats.killed += 1;
+                stats.no_converge += 1;
+                trace!(
+                    "Track {} killed: forward tracking did not converge (outcome: {:?})",
+                    track.id,
+                    forward.outcome
+                );
                 continue;
             }
 
@@ -133,20 +140,40 @@ impl<T: FlowTracker> TrackManager<T> {
                     .track_with_prior(curr_pyr, prev_pyr, forward.refined, None, intr);
             if !matches!(back.outcome, TrackOutcome::Converged) {
                 track.alive = false;
+                stats.killed += 1;
                 stats.fb_fail += 1;
+                trace!(
+                    "Track {} killed: backward tracking did not converge (outcome: {:?})",
+                    track.id,
+                    back.outcome
+                );
                 continue;
             }
 
             let fb_err = (back.refined - p_prev).norm();
             if fb_err > self.config.fb_th {
                 track.alive = false;
+                stats.killed += 1;
                 stats.fb_fail += 1;
+                trace!(
+                    "Track {} killed: FB error {:.2}px > threshold {:.2}px",
+                    track.id,
+                    fb_err,
+                    self.config.fb_th
+                );
                 continue;
             }
 
             if forward.residual > self.config.res_th {
                 track.alive = false;
+                stats.killed += 1;
                 stats.res_fail += 1;
+                trace!(
+                    "Track {} killed: residual {:.3} > threshold {:.3}",
+                    track.id,
+                    forward.residual,
+                    self.config.res_th
+                );
                 continue;
             }
 
