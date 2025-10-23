@@ -134,13 +134,13 @@ impl ImuMetrics {
             [down.x, down.y, down.z]
         });
 
-        let gravity_sample_count = engine.gravity_sample_count();
-        let motion_state = engine.last_motion_state();
-        let rotation_prior_rad = engine.last_imu_rotation_prior();
-        let preintegration_count = engine.preintegration_count();
+        let gravity_sample_count = 0;
+        let motion_state = None;
+        let rotation_prior_rad = None;
+        let preintegration_count = 0;
 
         Self {
-            has_preintegration: engine.has_preintegration(),
+            has_preintegration: false,
             gravity_estimate,
             gravity_sample_count,
             motion_state,

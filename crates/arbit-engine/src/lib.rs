@@ -6,6 +6,7 @@ pub mod debug_server;
 mod track_manager;
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::error::Error;
 use std::sync::{Arc, Mutex};
 
 use arbit_core::img::{build_pyramid, ImageBuffer, Pyramid, PyramidLevel};
@@ -216,7 +217,7 @@ impl ProcessingEngine<FastSeeder, OrbDescriptor> {
         let tracker = Arc::new(Tracker::new(LucasKanadeConfig::default()));
         let track_manager = TrackManager::new(tracker.clone(), TrackConfig::default());
 
-        let mut engine = Self {
+        let engine = Self {
             config,
             tracking_state: TrackingState::Uninitialized,
             frame_window: VecDeque::new(),
@@ -248,159 +249,14 @@ impl ProcessingEngine<FastSeeder, OrbDescriptor> {
             preintegration_count: 0,
         };
 
-        // Enable IMU preintegration by default
-        engine.enable_imu_preintegration(PreintegrationConfig::default());
-
         engine
     }
 }
 
 impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
-    // ========================================================================
-    // IMU PREINTEGRATION & MOTION TRACKING
-    // ========================================================================
-
-    /// Enables IMU preintegration for improved 6DOF estimation.
-    /// Call this to activate gyroscope + accelerometer fusion.
-    pub fn enable_imu_preintegration(&mut self, config: PreintegrationConfig) {
-        info!("Enabling IMU preintegration with config: {:?}", config);
-        self.preintegrator = Some(ImuPreintegrator::new(
-            config,
-            Vector3::zeros(), // Initial gyro bias
-            Vector3::zeros(), // Initial accel bias
-        ));
-        self.motion_detector = Some(MotionDetector::new(200)); // 1 second window at 200 Hz
-        self.gyro_bias_estimator = Some(GyroBiasEstimator::new(2000)); // 10 seconds at 200 Hz
-        self.accel_bias_estimator = Some(AccelBiasEstimator::new(2000, 9.80665));
-    }
-
-    /// Disables IMU preintegration (e.g., for visual-only mode).
-    pub fn disable_imu_preintegration(&mut self) {
-        info!("Disabling IMU preintegration");
-        self.preintegrator = None;
-        self.motion_detector = None;
-        self.gyro_bias_estimator = None;
-        self.accel_bias_estimator = None;
-        self.last_motion_stats = None;
-        self.last_preintegrated = None;
-    }
-
-    /// Returns whether IMU preintegration is currently enabled.
-    pub fn has_preintegration(&self) -> bool {
-        self.preintegrator.is_some()
-    }
-
     /// Returns a reference to the active engine configuration.
     pub fn config(&self) -> &EngineConfig {
         &self.config
-    }
-
-    /// Ingests an IMU sample (gyroscope + accelerometer) for preintegration.
-    /// Call this for each IMU sample between camera frames.
-    ///
-    /// * `timestamp` - Timestamp in seconds
-    /// * `gyro` - Gyroscope reading in rad/s (x, y, z)
-    /// * `accel` - Accelerometer reading in m/s² (x, y, z)
-    pub fn ingest_imu_sample(
-        &mut self,
-        timestamp: f64,
-        gyro: (f64, f64, f64),
-        accel: (f64, f64, f64),
-    ) {
-        let gyro_vec = Vector3::new(gyro.0, gyro.1, gyro.2);
-        let accel_vec = Vector3::new(accel.0, accel.1, accel.2);
-
-        // Update gravity estimator (uses accelerometer only)
-        let dt = 0.005; // Assume 200 Hz IMU rate
-        if let Some(gravity_est) = self.gravity_estimator.update(accel_vec, dt) {
-            self.last_gravity = Some(gravity_est.clone());
-
-            // Update motion detector if enabled
-            if let Some(ref mut detector) = self.motion_detector {
-                if let Some(ref gravity) = self.last_gravity {
-                    detector.set_gravity(gravity.as_vector(9.80665));
-                }
-                let motion_stats = detector.update(gyro_vec, accel_vec);
-                self.last_motion_stats = Some(motion_stats);
-
-                // Update bias estimators during stationary periods
-                if motion_stats.state == MotionState::Stationary {
-                    if let Some(ref mut gyro_bias_est) = self.gyro_bias_estimator {
-                        gyro_bias_est.update(gyro_vec);
-                    }
-                    if let Some(ref mut accel_bias_est) = self.accel_bias_estimator {
-                        accel_bias_est.update(accel_vec);
-                    }
-                }
-            }
-
-            // Integrate IMU if preintegrator is enabled
-            if let Some(ref mut preint) = self.preintegrator {
-                let timestamp_duration = std::time::Duration::from_secs_f64(timestamp);
-                let gravity_vec = gravity_est.as_vector(9.80665);
-                preint.integrate(timestamp_duration, gyro_vec, accel_vec, gravity_vec);
-            }
-        }
-    }
-
-    /// Finishes the current IMU preintegration interval and returns the result.
-    /// Returns the preintegrated IMU measurements if preintegration is enabled.
-    pub fn finish_imu_preintegration(&mut self) -> Option<PreintegratedImu> {
-        if let Some(ref mut preint) = self.preintegrator {
-            // Update bias estimates if available
-            if let Some(ref gyro_bias_est) = self.gyro_bias_estimator {
-                if gyro_bias_est.is_valid() {
-                    let gyro_bias = gyro_bias_est.bias();
-                    let accel_bias = self
-                        .accel_bias_estimator
-                        .as_ref()
-                        .and_then(|est| {
-                            if est.is_valid() {
-                                Some(est.bias())
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or_else(Vector3::zeros);
-                    preint.set_biases(gyro_bias, accel_bias);
-                }
-            }
-
-            let result = preint.finish();
-            self.last_preintegrated = Some(result.clone());
-            self.preintegration_count += 1;
-
-            debug!(
-                "IMU preintegration #{}: {} samples over {:.3}s, rotation={:.3}°",
-                self.preintegration_count,
-                result.sample_count,
-                result.delta_time.as_secs_f64(),
-                result.delta_rotation.log().norm().to_degrees()
-            );
-
-            Some(result)
-        } else {
-            None
-        }
-    }
-
-    /// Returns the last IMU rotation prior (in radians) if available.
-    pub fn last_imu_rotation_prior(&self) -> Option<f64> {
-        self.last_preintegrated
-            .as_ref()
-            .map(|p| p.delta_rotation.log().norm())
-    }
-
-    /// Returns the last motion state as a string if available.
-    pub fn last_motion_state(&self) -> Option<String> {
-        self.last_motion_stats
-            .as_ref()
-            .map(|s| format!("{:?}", s.state))
-    }
-
-    /// Returns the preintegration count (number of intervals completed).
-    pub fn preintegration_count(&self) -> usize {
-        self.preintegration_count
     }
 
     /// Returns the current frame index.
@@ -426,11 +282,7 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
     /// 4. Feature seeding
     /// 5. Feature tracking
     /// 6. Pose estimation (initialization or PnP)
-    /// 7. Local mapping
-    /// 8. Visual odometry monitoring
     pub fn ingest_camera_sample(&mut self, sample: &CameraSample) {
-        // Step 1: Finish IMU preintegration
-        let _preintegrated = self.finish_imu_preintegration();
         // Step 2: Extract image buffer
         let image = match self.extract_image_buffer(sample) {
             Some(image) => image,
@@ -455,7 +307,7 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
             tracks: Vec::new(),
             pose: None,
             gravity: None,
-            preintegrated_imu: _preintegrated,
+            preintegrated_imu: None,
         };
 
         let Some(prev_frame) = self.current_frame() else {
@@ -495,11 +347,24 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
         self.frame_index += 1;
 
         // Step 6: Estimate pose (initialization or tracking)
-        if is_key_frame {
-            self.step_estimate_pose();
+        match self.tracking_state {
+            TrackingState::Uninitialized => {
+                self.tracking_state = TrackingState::TrackingPreInit;
+            }
+            TrackingState::TrackingPreInit => {
+                if !is_key_frame {
+                    return;
+                }
+                if let Some(two_view) = self.run_two_view_initialization() {
+                    self.last_two_view = Some(two_view);
+                    self.tracking_state = TrackingState::Tracking;
+                    //TODO: Insert keyframe into map
+                }
+            }
+            TrackingState::Tracking => {
+                // TODO: Implement PnP tracking
+            }
         }
-        // Step 7 & 8: Build descriptor and update visual odometry
-        // self.step_visual_odometry(intrinsics, timestamp_seconds);
     }
 
     // ========================================================================
@@ -508,10 +373,6 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
 
     fn current_frame(&self) -> Option<&FrameData> {
         self.frame_window.front()
-    }
-
-    fn prev_frame(&self) -> Option<&FrameData> {
-        self.frame_window.get(1)
     }
 
     /// Cached pyramid levels for inspection.
@@ -586,140 +447,6 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
     /// Current estimated camera pose.
     pub fn current_pose(&self) -> &TransformSE3 {
         &self.current_pose
-    }
-
-    /// Get all landmarks projected into the current camera frame for debugging.
-    /// This helps visualize what the system "sees" from the map.
-    pub fn get_all_projected_landmarks(&self) -> Vec<ProjectedLandmark> {
-        let Some(intrinsics) = self.current_frame().map(|f| &f.intrinsics) else {
-            return Vec::new();
-        };
-
-        self.map
-            .landmarks_iter()
-            .filter_map(|landmark| {
-                self.project_landmark_internal(landmark.id, &landmark.position, intrinsics)
-            })
-            .collect()
-    }
-
-    /// Get only visible landmarks (in front of camera and within frame bounds).
-    pub fn get_visible_landmarks(&self) -> Vec<ProjectedLandmark> {
-        let Some(intrinsics) = self.current_frame().map(|f| &f.intrinsics) else {
-            return Vec::new();
-        };
-
-        self.map
-            .landmarks_iter()
-            .filter_map(|landmark| {
-                self.project_landmark_internal(landmark.id, &landmark.position, intrinsics)
-            })
-            .collect()
-    }
-
-    /// Get debug snapshot of the current map state.
-    pub fn get_map_debug_snapshot(&self) -> MapDebugSnapshot {
-        let rotation_matrix = self.current_pose.rotation.to_rotation_matrix();
-        let rotation_array = [
-            rotation_matrix[(0, 0)],
-            rotation_matrix[(0, 1)],
-            rotation_matrix[(0, 2)],
-            rotation_matrix[(1, 0)],
-            rotation_matrix[(1, 1)],
-            rotation_matrix[(1, 2)],
-            rotation_matrix[(2, 0)],
-            rotation_matrix[(2, 1)],
-            rotation_matrix[(2, 2)],
-        ];
-
-        MapDebugSnapshot {
-            camera_position: self.current_pose.translation.vector,
-            camera_rotation: rotation_array,
-            landmark_count: self.map.landmark_count(),
-            keyframe_count: self.map.keyframe_count(),
-            anchor_count: self.map.anchor_count(),
-        }
-    }
-
-    /// Get all landmark positions in world coordinates (for 3D visualization).
-    pub fn get_all_landmark_positions(&self) -> Vec<(u64, Point3<f64>)> {
-        self.map
-            .landmarks_iter()
-            .map(|lm| (lm.id, lm.position))
-            .collect()
-    }
-
-    /// Get all keyframe poses in world coordinates.
-    pub fn get_all_keyframe_poses(&self) -> Vec<(u64, TransformSE3)> {
-        self.map
-            .keyframes()
-            .map(|kf| (kf.id, kf.pose.clone()))
-            .collect()
-    }
-
-    // ========================================================================
-    // INTERNAL HELPERS: Projection & Visualization
-    // ========================================================================
-
-    /// Helper to project a landmark to screen space
-    fn project_landmark_internal(
-        &self,
-        landmark_id: u64,
-        world_position: &Point3<f64>,
-        intrinsics: &CameraIntrinsics,
-    ) -> Option<ProjectedLandmark> {
-        // Transform to camera frame
-        let camera_point = self.current_pose.transform_point(world_position);
-
-        // Check if in front of camera
-        if camera_point.z <= 0.0 {
-            return None;
-        }
-
-        // Project to normalized image coordinates
-        let normalized_u = camera_point.x / camera_point.z;
-        let normalized_v = camera_point.y / camera_point.z;
-
-        // Convert to pixel coordinates
-        let pixel_x = (normalized_u * intrinsics.fx + intrinsics.cx) as f32;
-        let pixel_y = (normalized_v * intrinsics.fy + intrinsics.cy) as f32;
-
-        // Check if within frame bounds
-        if pixel_x < 0.0
-            || pixel_x >= intrinsics.width as f32
-            || pixel_y < 0.0
-            || pixel_y >= intrinsics.height as f32
-        {
-            return None;
-        }
-
-        Some(ProjectedLandmark {
-            landmark_id,
-            world_position: *world_position,
-            normalized_u,
-            normalized_v,
-            pixel_x,
-            pixel_y,
-            depth: camera_point.z,
-        })
-    }
-
-    // ========================================================================
-    // MAP SERIALIZATION
-    // ========================================================================
-
-    /// Serialize the current map to a binary payload.
-    pub fn save_map(&self) -> Result<Vec<u8>, MapIoError> {
-        self.map.to_bytes()
-    }
-
-    /// Load a map from the provided binary payload.
-    pub fn load_map(&mut self, bytes: &[u8]) -> Result<(), MapIoError> {
-        self.map.load_from_bytes(bytes)?;
-        self.last_keyframe_id = self.map.max_keyframe_id();
-        self.last_relocalization = None;
-        self.vo_loop.reset();
-        Ok(())
     }
 
     // ========================================================================
@@ -835,52 +562,19 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
         advanced
     }
 
-    /// Step 6: Estimate camera pose using initialization or PnP tracking.
-    fn step_estimate_pose(&mut self) {
-        match self.tracking_state {
-            TrackingState::Uninitialized => {
-                // First frame: transition to pre-init
-                self.tracking_state = TrackingState::TrackingPreInit;
-                info!(target: "arbit_engine", "      [6] Pose: Uninitialized → TrackingPreInit");
-            }
-            TrackingState::TrackingPreInit => {
-                // Second frame onwards: try two-view initialization
-                let _span = debug_span!("estimate_pose two_view_initialization").entered();
-                info!(target: "arbit_engine", "      [6] Pose: TrackingPreInit (map: {} landmarks, {} keyframes)",
-                      self.map.landmark_count(), self.map.keyframe_count());
-
-                if self.map.is_empty() {
-                    self.run_two_view_initialization();
-                } else {
-                    // Map exists but we're in pre-init state - transition to tracking
-                    warn!(
-                        target: "arbit_engine",
-                        "         Map EXISTS ({} landmarks) - transitioning to Tracking",
-                        self.map.landmark_count()
-                    );
-                    self.tracking_state = TrackingState::Tracking;
-                }
-            }
-            TrackingState::Tracking => {
-                let _span = debug_span!("estimate_pose pnp_tracking").entered();
-                self.run_pnp_tracking();
-            }
-        }
-    }
-
     // ========================================================================
     // POSE ESTIMATION: Two-View Initialization & PnP Tracking
     // ========================================================================
 
     /// Run two-view initialization to bootstrap the map.
     /// Creates the initial map with gravity-aligned coordinate frame.
-    fn run_two_view_initialization(&mut self) {
+    fn run_two_view_initialization(&mut self) -> Option<TwoViewInitialization> {
         let _span = debug_span!("two_view_initialization").entered();
 
         // Extract and clone data from frame window to avoid borrowing issues
         let Some(curr_frame) = self.keyframe_window.front() else {
             debug!("No current frame available for two-view initialization");
-            return;
+            return None;
         };
 
         // Try to find a good frame pair for initialization
@@ -889,7 +583,7 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
         for frame_i in 1..self.keyframe_window.len() {
             let Some(older_keyframe) = self.keyframe_window.get(frame_i) else {
                 debug!("No older frame available for two-view initialization");
-                return;
+                return None;
             };
             let prev_intrinsics = &older_keyframe.frame_data.intrinsics;
 
@@ -933,7 +627,7 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
 
             if let Some(two_view) = two_view {
                 // Success! Store the results and break from the loop
-                two_view_result = Some((two_view, prev_intrinsics.clone()));
+                two_view_result = Some((two_view.clone(), prev_intrinsics.clone()));
                 break;
             } else {
                 warn!(target: "arbit_engine", "⚠️  Two-view FAILED - trying next frame pair");
@@ -944,7 +638,7 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
         // Check if we found a valid initialization
         let Some((two_view, prev_intrinsics)) = two_view_result else {
             debug!("No valid frame pair found for two-view initialization");
-            return;
+            return None;
         };
 
         // Apply gravity alignment if available
@@ -959,9 +653,6 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
         let scaled_two_view = two_view.scaled(self.config.baseline_scale);
         let landmark_count = scaled_two_view.landmarks.len();
 
-        // CRITICAL: world_alignment = T_world_cam (camera → world rotation)
-        // But current_pose must be T_cam_world (for projection: world → camera)
-        // So we need to INVERT it!
         let initial_pose = world_alignment.inverse();
         self.current_pose = initial_pose.clone();
 
@@ -971,141 +662,13 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
         self.current_pose = update_pose(&initial_pose, &scaled_two_view);
         self.trajectory.push(self.current_pose.translation.vector);
 
-        // Transition to tracking mode
-        self.tracking_state = TrackingState::Tracking;
-        self.last_two_view = Some(scaled_two_view);
-
         info!(
             target: "arbit_engine",
             "✅ Map initialized with {} landmarks, gravity-aligned world frame. STATE: TrackingPreInit → Tracking",
             landmark_count
         );
-    }
 
-    /// Run PnP-based tracking to estimate camera pose from map landmarks.
-    fn run_pnp_tracking(&mut self) {
-        // Extract current frame data (clone to avoid borrowing issues)
-        let (tracks, intrinsics) = {
-            let Some(current) = self.current_frame() else {
-                debug!("No current frame available for PnP tracking");
-                return;
-            };
-            (current.tracks.clone(), current.intrinsics.clone())
-        };
-
-        // CRITICAL FIX: Track indices change every frame when features are re-seeded!
-        // We need to match by POSITION, not by track index.
-
-        // Build observations by matching current tracks to landmarks via last keyframe
-        let mut observations = Vec::new();
-        let mut new_tracked_mapping = HashMap::new();
-
-        // Get last keyframe to match against
-        let last_keyframe = self.map.keyframe_count().saturating_sub(1).max(0) as u64;
-        let Some(keyframe) = self.map.keyframe(last_keyframe) else {
-            warn!(target: "arbit_engine", "No keyframe available for feature matching");
-            return;
-        };
-
-        for track in tracks.iter() {
-            if !matches!(track.outcome, TrackOutcome::Converged) {
-                continue;
-            }
-
-            let Some(track_id) = track.id else {
-                continue;
-            };
-
-            let normalized = normalize_pixel(track.refined, &intrinsics);
-
-            // Find the nearest landmark in the keyframe (spatial matching)
-            let mut best_match: Option<(u64, f64)> = None;
-            let threshold = 0.02; // 20 pixels normalized distance
-
-            for feature in keyframe.features() {
-                let dist = (Vector2::new(feature.normalized.x as f64, feature.normalized.y as f64)
-                    - normalized)
-                    .norm();
-
-                if dist < threshold {
-                    match best_match {
-                        Some((_, best_dist)) if dist < best_dist => {
-                            best_match = Some((feature.landmark_id, dist));
-                        }
-                        None => {
-                            best_match = Some((feature.landmark_id, dist));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            if let Some((landmark_id, _)) = best_match {
-                if let Some(landmark) = self.map.landmark(landmark_id) {
-                    observations.push(PnPObservation {
-                        world_point: landmark.position,
-                        normalized_image: normalized,
-                    });
-                    new_tracked_mapping.insert(track_id, landmark_id);
-                }
-            }
-        }
-
-        // Update the mapping (replaces old indices)
-        self.tracked_landmark_ids = new_tracked_mapping;
-
-        info!(
-            target: "arbit_engine",
-            "📍 PnP tracking: {} observations from {} tracks (tracked_ids: {})",
-            observations.len(),
-            tracks.len(),
-            self.tracked_landmark_ids.len()
-        );
-
-        if observations.len() < self.config.relocalization_min_inliers {
-            warn!(
-                "Insufficient PnP observations ({} < {}), map may exist - staying in tracking mode to try relocalization",
-                observations.len(),
-                self.config.relocalization_min_inliers
-            );
-            // Don't fall back to two-view if map exists!
-            // The VO loop will detect loss and trigger relocalization
-            self.tracked_landmark_ids.clear();
-            return;
-        }
-
-        let result = {
-            let _span = debug_span!("pnp_estimation").entered();
-            let result = self.pnp.estimate(&observations);
-            if result.is_none() {
-                warn!("      PnP estimation (FAILED), will try relocalization");
-            }
-            result
-        };
-
-        let Some(result) = result else {
-            // Don't reset to TrackingPreInit - stay in Tracking mode
-            // Let relocalization handle finding the camera in the map
-            self.tracked_landmark_ids.clear();
-            return;
-        };
-
-        let pos = result.pose.translation.vector;
-        info!(
-            target: "arbit_engine",
-            "✅ PnP success: {} inliers, error: {:.4}, pose: [{:.3}, {:.3}, {:.3}]",
-            result.inliers.len(),
-            result.average_reprojection_error,
-            pos.x, pos.y, pos.z
-        );
-
-        // Update current pose
-        self.current_pose = result.pose.clone();
-        self.trajectory.push(self.current_pose.translation.vector);
-        if self.trajectory.len() > self.config.max_trajectory_points {
-            let trim = self.trajectory.len() - self.config.max_trajectory_points;
-            self.trajectory.drain(0..trim);
-        }
+        Some(two_view)
     }
 
     fn encode_luma(&self, level: &PyramidLevel) -> Vec<u8> {
@@ -1117,130 +680,12 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
             .collect()
     }
 }
-// ============================================================================
-// STANDALONE HELPER FUNCTIONS
-// ============================================================================
-
-fn build_feature_matches(
-    observations: &[TrackObservation],
-    prev_intrinsics: &CameraIntrinsics,
-    curr_intrinsics: &CameraIntrinsics,
-) -> Vec<(u64, FeatureMatch)> {
-    observations
-        .iter()
-        .enumerate()
-        .filter_map(|(index, obs)| {
-            if !matches!(obs.outcome, TrackOutcome::Converged) {
-                return None;
-            }
-            let track_id = obs.identifier(index);
-            Some((
-                track_id,
-                FeatureMatch {
-                    normalized_a: normalize_pixel(obs.initial, prev_intrinsics),
-                    normalized_b: normalize_pixel(obs.refined, curr_intrinsics),
-                },
-            ))
-        })
-        .collect()
-}
-
-fn normalize_pixel(pixel: Vector2<f32>, intrinsics: &CameraIntrinsics) -> Vector2<f64> {
-    Vector2::new(
-        (pixel.x as f64 - intrinsics.cx) / intrinsics.fx,
-        (pixel.y as f64 - intrinsics.cy) / intrinsics.fy,
-    )
-}
 
 fn update_pose(current: &TransformSE3, two_view: &TwoViewInitialization) -> TransformSE3 {
     let rotation = UnitQuaternion::from_rotation_matrix(&two_view.rotation);
     let translation = Translation3::from(two_view.translation);
     let delta = TransformSE3::from_parts(translation, rotation);
     current * delta
-}
-
-/// Triangulates a 3D point from two observations with known camera poses.
-/// Returns the 3D point in world coordinates if triangulation succeeds.
-fn triangulate_with_poses(
-    pose_a: &TransformSE3,
-    pose_b: &TransformSE3,
-    normalized_a: Vector2<f64>,
-    normalized_b: Vector2<f64>,
-) -> Option<Point3<f64>> {
-    // Build projection matrices from poses
-    let proj_a = pose_to_projection(pose_a);
-    let proj_b = pose_to_projection(pose_b);
-
-    // Build the triangulation system
-    let mut a = nalgebra::DMatrix::<f64>::zeros(4, 4);
-
-    // Row for normalized_a.x
-    fill_triangulation_row(&mut a, 0, &proj_a, normalized_a.x, 0);
-    // Row for normalized_a.y
-    fill_triangulation_row(&mut a, 1, &proj_a, normalized_a.y, 1);
-    // Row for normalized_b.x
-    fill_triangulation_row(&mut a, 2, &proj_b, normalized_b.x, 0);
-    // Row for normalized_b.y
-    fill_triangulation_row(&mut a, 3, &proj_b, normalized_b.y, 1);
-
-    let svd = nalgebra::SVD::new(a, true, true);
-    let v_t = svd.v_t?;
-    let homog = v_t.row(v_t.nrows() - 1);
-
-    if homog[3].abs() < 1e-12 {
-        return None;
-    }
-
-    let point = Point3::new(
-        homog[0] / homog[3],
-        homog[1] / homog[3],
-        homog[2] / homog[3],
-    );
-
-    // Verify the point is in front of both cameras
-    let cam_a = pose_a.transform_point(&point);
-    let cam_b = pose_b.transform_point(&point);
-
-    if cam_a.z > 0.0 && cam_b.z > 0.0 {
-        Some(point)
-    } else {
-        None
-    }
-}
-
-/// Converts a pose to a 3x4 projection matrix [R | t]
-fn pose_to_projection(pose: &TransformSE3) -> Matrix3x4<f64> {
-    let r = pose.rotation.to_rotation_matrix();
-    let t = pose.translation.vector;
-    Matrix3x4::new(
-        r[(0, 0)],
-        r[(0, 1)],
-        r[(0, 2)],
-        t.x,
-        r[(1, 0)],
-        r[(1, 1)],
-        r[(1, 2)],
-        t.y,
-        r[(2, 0)],
-        r[(2, 1)],
-        r[(2, 2)],
-        t.z,
-    )
-}
-
-/// Fills a row of the triangulation matrix
-fn fill_triangulation_row(
-    a: &mut nalgebra::DMatrix<f64>,
-    row: usize,
-    projection: &Matrix3x4<f64>,
-    value: f64,
-    axis: usize,
-) {
-    let row_data = projection.row(axis);
-    let third_row = projection.row(2);
-    for col in 0..4 {
-        a[(row, col)] = value * third_row[col] - row_data[col];
-    }
 }
 
 /// Aligns the world coordinate frame so that the Y-axis points up (opposite to gravity).
@@ -1285,88 +730,5 @@ fn align_world_to_gravity(gravity: &GravityEstimate) -> TransformSE3 {
 impl Default for ProcessingEngine<FastSeeder, OrbDescriptor> {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Convenience accessor for trajectory timestamps.
-pub fn timestamps_to_seconds(timestamps: &FrameTimestamps) -> (f64, f64, f64) {
-    (
-        timestamps.capture.as_duration().as_secs_f64(),
-        timestamps.pipeline.as_duration().as_secs_f64(),
-        timestamps.latency.as_secs_f64(),
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use arbit_providers::{ArKitFrame, ArKitIntrinsics, IosCameraProvider, PixelFormat};
-    use nalgebra::Point3;
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    #[test]
-    fn test_pose_convention() {
-        // Test: verify Isometry3 represents T_cam_world (world → camera)
-
-        // Camera at (1, 0, 0) in world, rotated 90° around Y
-        let rotation =
-            UnitQuaternion::from_axis_angle(&Vector3::y_axis(), std::f64::consts::FRAC_PI_2);
-        let translation = Translation3::new(1.0, 0.0, 0.0);
-        let pose = TransformSE3::from_parts(translation, rotation);
-
-        // Point at (2, 0, 0) in world (1m in front of camera along X)
-        let world_point = Point3::new(2.0, 0.0, 0.0);
-
-        // Transform world → camera
-        let camera_point = pose.transform_point(&world_point);
-
-        // Expected in camera frame: point should be at (0, 0, -1)
-        // Because camera is at (1,0,0) looking along +Z after 90° Y rotation
-        println!("Camera point: {:?}", camera_point);
-        println!("Expected: ~(0, 0, -1) if pose = T_cam_world");
-
-        // For projection (world → camera), we expect reasonable camera coordinates
-        assert!(
-            camera_point.z.abs() < 10.0,
-            "Point should be at reasonable depth"
-        );
-    }
-
-    fn sample_camera_sample() -> CameraSample {
-        // Use IosCameraProvider to properly create a CameraSample with valid timestamps
-        let mut provider = IosCameraProvider::new();
-        let intrinsics = ArKitIntrinsics {
-            fx: 800.0,
-            fy: 800.0,
-            cx: 320.0,
-            cy: 240.0,
-            skew: 0.0,
-            width: 640,
-            height: 480,
-            distortion: None,
-        };
-        let bytes_per_row = 640 * 4;
-        let buffer = vec![0u8; 480 * bytes_per_row];
-
-        let frame = ArKitFrame {
-            timestamp: Duration::from_millis(0),
-            intrinsics,
-            pixel_format: PixelFormat::Bgra8,
-            bytes_per_row,
-            data: Arc::from(buffer),
-        };
-
-        provider.ingest_frame(frame)
-    }
-
-    #[test]
-    fn engine_ingests_sample() {
-        let mut engine = ProcessingEngine::new();
-        let sample = sample_camera_sample();
-        engine.ingest_camera_sample(&sample);
-        assert_eq!(sample.intrinsics.width, 640);
-        assert!(!engine.pyramid_levels().is_empty());
-        assert!(engine.trajectory().len() >= 1);
     }
 }

@@ -13,7 +13,6 @@ use arbit_core::track::{
 use arbit_engine::ProcessingEngine;
 use arbit_providers::{ArKitFrame, ArKitIntrinsics, CameraSample, IosCameraProvider, PixelFormat};
 use log::{info, warn};
-use nalgebra::{Matrix4, Translation3, UnitQuaternion, Vector3};
 use tracing_subscriber::{EnvFilter, fmt};
 
 struct CaptureContext<
@@ -552,27 +551,6 @@ fn transform_to_ffi(transform: &TransformSE3) -> ArbitTransform {
     output
 }
 
-fn transform_from_ffi(raw: &ArbitTransform) -> Option<TransformSE3> {
-    let matrix = Matrix4::from_row_slice(&raw.elements);
-    let last_row = matrix.row(3);
-    if last_row[3].abs() < f64::EPSILON {
-        return None;
-    }
-    if last_row[0].abs() > 1e-6 || last_row[1].abs() > 1e-6 || last_row[2].abs() > 1e-6 {
-        return None;
-    }
-    if (last_row[3] - 1.0).abs() > 1e-6 {
-        return None;
-    }
-    let rotation_matrix = matrix.fixed_view::<3, 3>(0, 0).into_owned();
-    let translation = Vector3::new(matrix[(0, 3)], matrix[(1, 3)], matrix[(2, 3)]);
-    let rotation = UnitQuaternion::from_matrix(&rotation_matrix);
-    Some(TransformSE3::from_parts(
-        Translation3::from(translation),
-        rotation,
-    ))
-}
-
 // =============================================================================
 // SIMPLIFIED API - Consistent Naming Convention
 // =============================================================================
@@ -627,76 +605,6 @@ pub unsafe extern "C" fn arbit_ingest_frame(
     true
 }
 
-/// Ingests a full 6DOF IMU sample (accelerometer + gyroscope)
-///
-/// * `timestamp_seconds` - Timestamp in seconds
-/// * `accel_*` - Accelerometer reading in m/s² (x, y, z)
-/// * `gyro_*` - Gyroscope reading in rad/s (x, y, z)
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arbit_ingest_imu(
-    handle: *mut ArbitCaptureContextHandle,
-    sample: ArbitImuSample,
-) -> bool {
-    if handle.is_null() {
-        return false;
-    }
-
-    let context = handle_to_context(handle);
-    context.engine.ingest_imu_sample(
-        sample.timestamp_seconds,
-        (sample.gyro_x, sample.gyro_y, sample.gyro_z),
-        (sample.accel_x, sample.accel_y, sample.accel_z),
-    );
-    true
-}
-
-/// Gets unified IMU state in a single call
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arbit_get_imu_state(
-    handle: *mut ArbitCaptureContextHandle,
-    out_state: *mut ArbitImuState,
-) -> bool {
-    if handle.is_null() || out_state.is_null() {
-        return false;
-    }
-
-    let context = handle_to_context(handle);
-    let mut state = ArbitImuState::default();
-
-    // Get rotation prior
-    if let Some(rotation) = context.engine.last_imu_rotation_prior() {
-        state.has_rotation_prior = true;
-        state.rotation_prior_radians = rotation;
-    }
-
-    // Get motion state
-    if let Some(motion) = context.engine.last_motion_state() {
-        state.has_motion_state = true;
-        state.motion_state = match motion.as_str() {
-            "Stationary" => 0,
-            "SlowMotion" => 1,
-            "FastMotion" => 2,
-            _ => 0,
-        };
-    }
-
-    // Get gravity estimate
-    if let Some(gravity) = context.engine.gravity_estimate() {
-        state.has_gravity = true;
-        let down = gravity.down().into_inner();
-        state.gravity_down = [down.x, down.y, down.z];
-        state.gravity_samples = context.engine.gravity_sample_count();
-    }
-
-    // Get preintegration count
-    state.preintegration_count = context.engine.preintegration_count() as u32;
-
-    unsafe {
-        *out_state = state;
-    }
-    true
-}
-
 /// Gets comprehensive frame state in a single call
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn arbit_get_frame_state(
@@ -745,27 +653,27 @@ pub unsafe extern "C" fn arbit_get_frame_state(
     state.landmark_count = landmarks;
     state.anchor_count = anchors;
 
-    // Get IMU state
-    if let Some(rotation) = context.engine.last_imu_rotation_prior() {
-        state.imu.has_rotation_prior = true;
-        state.imu.rotation_prior_radians = rotation;
-    }
-    if let Some(motion) = context.engine.last_motion_state() {
-        state.imu.has_motion_state = true;
-        state.imu.motion_state = match motion.as_str() {
-            "Stationary" => 0,
-            "SlowMotion" => 1,
-            "FastMotion" => 2,
-            _ => 0,
-        };
-    }
+    // // Get IMU state
+    // if let Some(rotation) = context.engine.last_imu_rotation_prior() {
+    //     state.imu.has_rotation_prior = true;
+    //     state.imu.rotation_prior_radians = rotation;
+    // }
+    // if let Some(motion) = context.engine.last_motion_state() {
+    //     state.imu.has_motion_state = true;
+    //     state.imu.motion_state = match motion.as_str() {
+    //         "Stationary" => 0,
+    //         "SlowMotion" => 1,
+    //         "FastMotion" => 2,
+    //         _ => 0,
+    //     };
+    // }
     if let Some(gravity) = context.engine.gravity_estimate() {
         state.imu.has_gravity = true;
         let down = gravity.down().into_inner();
         state.imu.gravity_down = [down.x, down.y, down.z];
         state.imu.gravity_samples = context.engine.gravity_sample_count();
     }
-    state.imu.preintegration_count = context.engine.preintegration_count() as u32;
+    // state.imu.preintegration_count = context.engine.preintegration_count() as u32;
 
     unsafe {
         *out_state = state;
@@ -989,126 +897,6 @@ pub unsafe extern "C" fn arbit_get_trajectory(
     count
 }
 
-/// Gets all visible landmarks in the current camera frame (for debugging)
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arbit_get_visible_landmarks(
-    handle: *mut ArbitCaptureContextHandle,
-    out_landmarks: *mut ArbitProjectedLandmark,
-    max_landmarks: usize,
-) -> usize {
-    if handle.is_null() || out_landmarks.is_null() || max_landmarks == 0 {
-        return 0;
-    }
-
-    let context = handle_to_context(handle);
-    let visible = context.engine.get_visible_landmarks();
-    let count = visible.len().min(max_landmarks);
-    let dest = unsafe { slice::from_raw_parts_mut(out_landmarks, count) };
-
-    for (dst, projected) in dest.iter_mut().zip(visible.iter()) {
-        *dst = ArbitProjectedLandmark {
-            landmark_id: projected.landmark_id,
-            world_x: projected.world_position.x,
-            world_y: projected.world_position.y,
-            world_z: projected.world_position.z,
-            normalized_u: projected.normalized_u,
-            normalized_v: projected.normalized_v,
-            pixel_x: projected.pixel_x,
-            pixel_y: projected.pixel_y,
-            depth: projected.depth,
-        };
-    }
-
-    count
-}
-
-/// Gets a debug snapshot of the map state
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arbit_get_map_debug_snapshot(
-    handle: *mut ArbitCaptureContextHandle,
-    out_snapshot: *mut ArbitMapDebugSnapshot,
-) -> bool {
-    if handle.is_null() || out_snapshot.is_null() {
-        return false;
-    }
-
-    let context = handle_to_context(handle);
-    let snapshot = context.engine.get_map_debug_snapshot();
-
-    unsafe {
-        *out_snapshot = ArbitMapDebugSnapshot {
-            camera_x: snapshot.camera_position.x,
-            camera_y: snapshot.camera_position.y,
-            camera_z: snapshot.camera_position.z,
-            camera_rotation: snapshot.camera_rotation,
-            landmark_count: snapshot.landmark_count as u64,
-            keyframe_count: snapshot.keyframe_count as u64,
-            anchor_count: snapshot.anchor_count as u64,
-        };
-    }
-
-    true
-}
-
-/// Saves map to buffer
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arbit_save_map(
-    handle: *mut ArbitCaptureContextHandle,
-    out_buffer: *mut u8,
-    buffer_len: usize,
-    out_written: *mut usize,
-) -> bool {
-    if handle.is_null() {
-        return false;
-    }
-
-    let context = handle_to_context(handle);
-    let bytes = match context.engine.save_map() {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            warn!("Failed to serialize map: {err}");
-            return false;
-        }
-    };
-
-    if !out_written.is_null() {
-        unsafe {
-            *out_written = bytes.len();
-        }
-    }
-
-    if out_buffer.is_null() || buffer_len < bytes.len() {
-        return false;
-    }
-
-    unsafe {
-        ptr::copy_nonoverlapping(bytes.as_ptr(), out_buffer, bytes.len());
-    }
-    true
-}
-
-/// Loads map from buffer
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arbit_load_map(
-    handle: *mut ArbitCaptureContextHandle,
-    data: *const u8,
-    data_len: usize,
-) -> bool {
-    if handle.is_null() || data.is_null() || data_len == 0 {
-        return false;
-    }
-
-    let context = handle_to_context(handle);
-    let bytes = unsafe { slice::from_raw_parts(data, data_len) };
-    match context.engine.load_map(bytes) {
-        Ok(()) => true,
-        Err(err) => {
-            warn!("Failed to load map: {err}");
-            false
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1220,45 +1008,6 @@ mod tests {
         assert_eq!(frame_state.keyframe_count, 0);
         assert_eq!(frame_state.landmark_count, 0);
         assert_eq!(frame_state.anchor_count, 0);
-
-        unsafe {
-            arbit_context_destroy(handle);
-        }
-    }
-
-    #[test]
-    fn simplified_api_get_imu_state() {
-        let handle = arbit_context_create();
-        assert!(!handle.is_null());
-
-        // Get IMU state should succeed even with no data
-        let mut imu_state = ArbitImuState::default();
-        unsafe {
-            assert!(arbit_get_imu_state(handle, &mut imu_state as *mut _));
-        }
-
-        // Verify default values
-        assert!(!imu_state.has_rotation_prior);
-        assert!(!imu_state.has_motion_state);
-        assert!(!imu_state.has_gravity);
-        assert_eq!(imu_state.preintegration_count, 0);
-
-        unsafe {
-            arbit_context_destroy(handle);
-        }
-    }
-
-    #[test]
-    fn simplified_api_map_operations() {
-        let handle = arbit_context_create();
-        assert!(!handle.is_null());
-
-        // Test simplified save map (should get size even with empty map)
-        let mut required: usize = 0;
-        unsafe {
-            arbit_save_map(handle, ptr::null_mut(), 0, &mut required);
-        }
-        assert!(required > 0);
 
         unsafe {
             arbit_context_destroy(handle);
