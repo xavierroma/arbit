@@ -16,17 +16,15 @@ use arbit_core::imu::{
 use arbit_core::init::two_view::{
     FeatureMatch, TwoViewInitialization, TwoViewInitializationParams, TwoViewInitializer,
 };
-use arbit_core::map::{
-    self, build_descriptor, Anchor, DescriptorInfo, DescriptorSample, KeyframeData, MapIoError,
-    WorldMap,
-};
+use arbit_core::map::{self, Anchor, KeyframeData, MapIoError, WorldMap};
 use arbit_core::math::se3::TransformSE3;
 use arbit_core::math::CameraIntrinsics;
 use arbit_core::relocalize::{PnPObservation, PnPRansac, PnPRansacParams, PnPResult};
 use arbit_core::time::FrameTimestamps;
 use arbit_core::track::{
-    FastSeeder, FastSeederConfig, FeatureGridConfig, FeatureSeed, FeatureSeederTrait,
-    LucasKanadeConfig, TrackObservation, TrackOutcome, Tracker,
+    DescriptorBuffer, FastSeeder, FastSeederConfig, FeatDescriptor, FeatDescriptorExtractor,
+    FeatureSeederTrait, HammingFeatMatcher, LucasKanadeConfig, OrbDescriptor, TrackObservation,
+    TrackOutcome, Tracker,
 };
 use arbit_core::vo::{FrameObservation, VoLoop, VoLoopConfig, VoStatus};
 use arbit_providers::CameraSample;
@@ -34,9 +32,7 @@ use log::{debug, info, warn};
 use nalgebra::{Matrix3x4, Point3, Translation3, UnitQuaternion, Vector2, Vector3};
 use tracing::debug_span;
 
-use crate::track_manager::{
-    apply_score_threshold, drop_near_live, grid_cap, non_max_suppression, TrackConfig, TrackManager,
-};
+use crate::track_manager::{drop_near_live, TrackConfig, TrackManager};
 
 /// Processing constants grouped into a configuration structure.
 #[derive(Debug, Clone)]
@@ -132,6 +128,7 @@ pub struct MapDebugSnapshot {
     pub anchor_count: usize,
 }
 
+#[derive(Debug, Clone)]
 pub struct FrameData {
     // Identification
     pub frame_index: u64,
@@ -144,7 +141,6 @@ pub struct FrameData {
 
     // Tracking results
     pub tracks: Vec<TrackObservation>,
-    pub seeds: Vec<FeatureSeed>,
 
     // Pose estimation (if available)
     pub pose: Option<TransformSE3>,
@@ -153,12 +149,18 @@ pub struct FrameData {
     // Optional: IMU preintegration from previous frame
     pub preintegrated_imu: Option<PreintegratedImu>,
 }
+
+pub struct KeyFrameData<D: DescriptorBuffer> {
+    pub frame_data: FrameData,
+    pub descriptors: Vec<FeatDescriptor<D>>,
+}
 /// Processing engine that encapsulates the full camera/IMU pipeline.
-pub struct ProcessingEngine<S: FeatureSeederTrait> {
+pub struct ProcessingEngine<S: FeatureSeederTrait, D: FeatDescriptorExtractor> {
     config: EngineConfig,
     tracking_state: TrackingState,
 
     frame_window: VecDeque<FrameData>,
+    keyframe_window: VecDeque<KeyFrameData<D::Storage>>,
     // last_intrinsics: Option<CameraIntrinsics>,
     // prev_pyramid: Option<Pyramid>,
     // pyramid_cache: Vec<PyramidLevelCache>,
@@ -179,7 +181,9 @@ pub struct ProcessingEngine<S: FeatureSeederTrait> {
     last_preintegrated: Option<PreintegratedImu>,
     preintegration_count: usize,
 
-    seeder: S,
+    feat_detector: S,
+    feat_descriptor: D,
+    feat_matcher: HammingFeatMatcher,
     tracker: Arc<Tracker>,
     track_manager: Mutex<TrackManager<Tracker>>,
     two_view_initializer: TwoViewInitializer,
@@ -191,7 +195,7 @@ pub struct ProcessingEngine<S: FeatureSeederTrait> {
     accel_bias_estimator: Option<AccelBiasEstimator>,
 }
 
-impl ProcessingEngine<FastSeeder> {
+impl ProcessingEngine<FastSeeder, OrbDescriptor> {
     // ========================================================================
     // CONSTRUCTION & CONFIGURATION
     // ========================================================================
@@ -216,7 +220,10 @@ impl ProcessingEngine<FastSeeder> {
             config,
             tracking_state: TrackingState::Uninitialized,
             frame_window: VecDeque::new(),
-            seeder: FastSeeder::new(FastSeederConfig::default()),
+            keyframe_window: VecDeque::new(),
+            feat_detector: FastSeeder::new(FastSeederConfig::default()),
+            feat_descriptor: OrbDescriptor::new(),
+            feat_matcher: HammingFeatMatcher::default(),
             tracker,
             track_manager: Mutex::new(track_manager),
             last_two_view: None,
@@ -248,7 +255,7 @@ impl ProcessingEngine<FastSeeder> {
     }
 }
 
-impl<S: FeatureSeederTrait> ProcessingEngine<S> {
+impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
     // ========================================================================
     // IMU PREINTEGRATION & MOTION TRACKING
     // ========================================================================
@@ -446,7 +453,6 @@ impl<S: FeatureSeederTrait> ProcessingEngine<S> {
             pyramid,
             intrinsics,
             tracks: Vec::new(),
-            seeds: Vec::new(),
             pose: None,
             gravity: None,
             preintegrated_imu: _preintegrated,
@@ -468,6 +474,20 @@ impl<S: FeatureSeederTrait> ProcessingEngine<S> {
             frame_data.frame_index,
         );
         frame_data.tracks = tracks;
+
+        let is_key_frame = self.frame_index % 60 == 0;
+        if is_key_frame {
+            let _span = debug_span!("feat_descriptor").entered();
+            let curr_frame = frame_data.clone();
+            let seeds = self.feat_detector.seed(&curr_frame.pyramid);
+            let descriptors = self.feat_descriptor.describe(&frame_data.pyramid, &seeds);
+            let keyframe_data = KeyFrameData {
+                frame_data: curr_frame,
+                descriptors,
+            };
+            self.keyframe_window.push_front(keyframe_data);
+        }
+
         self.frame_window.push_front(frame_data);
         if self.frame_window.len() > self.config.frame_window_size {
             self.frame_window.pop_back();
@@ -475,7 +495,9 @@ impl<S: FeatureSeederTrait> ProcessingEngine<S> {
         self.frame_index += 1;
 
         // Step 6: Estimate pose (initialization or tracking)
-        self.step_estimate_pose();
+        if is_key_frame {
+            self.step_estimate_pose();
+        }
         // Step 7 & 8: Build descriptor and update visual odometry
         // self.step_visual_odometry(intrinsics, timestamp_seconds);
     }
@@ -517,6 +539,13 @@ impl<S: FeatureSeederTrait> ProcessingEngine<S> {
     pub fn tracked_points(&self) -> &[TrackObservation] {
         self.current_frame()
             .map(|f| f.tracks.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn descriptors(&self) -> &[FeatDescriptor<D::Storage>] {
+        self.keyframe_window
+            .front()
+            .map(|kf| kf.descriptors.as_slice())
             .unwrap_or(&[])
     }
 
@@ -631,50 +660,6 @@ impl<S: FeatureSeederTrait> ProcessingEngine<S> {
     // ========================================================================
     // INTERNAL HELPERS: Projection & Visualization
     // ========================================================================
-
-    /// Helper to project a single anchor to screen space
-    fn project_anchor_internal(
-        &self,
-        anchor: &Anchor,
-        intrinsics: &CameraIntrinsics,
-    ) -> Option<ProjectedAnchor> {
-        // Extract world position from anchor pose (translation component)
-        let world_position = Point3::from(anchor.pose.translation.vector);
-
-        // Transform to camera frame
-        let camera_point = self.current_pose.transform_point(&world_position);
-
-        // Check if in front of camera
-        if camera_point.z <= 0.0 {
-            return None;
-        }
-
-        // Project to normalized image coordinates
-        let normalized_u = camera_point.x / camera_point.z;
-        let normalized_v = camera_point.y / camera_point.z;
-
-        // Convert to pixel coordinates
-        let pixel_x = (normalized_u * intrinsics.fx + intrinsics.cx) as f32;
-        let pixel_y = (normalized_v * intrinsics.fy + intrinsics.cy) as f32;
-
-        // Check if within frame bounds
-        if pixel_x < 0.0
-            || pixel_x >= intrinsics.width as f32
-            || pixel_y < 0.0
-            || pixel_y >= intrinsics.height as f32
-        {
-            return None;
-        }
-
-        Some(ProjectedAnchor {
-            anchor: anchor.clone(),
-            normalized_u,
-            normalized_v,
-            pixel_x,
-            pixel_y,
-            depth: camera_point.z,
-        })
-    }
 
     /// Helper to project a landmark to screen space
     fn project_landmark_internal(
@@ -806,7 +791,7 @@ impl<S: FeatureSeederTrait> ProcessingEngine<S> {
         // Step 4b: detect new candidates on the previous frame
         let mut seeds = {
             let _span = debug_span!("seed_features").entered();
-            let raw = self.seeder.seed(&prev_pyramid.levels()[0]);
+            let raw = self.feat_detector.seed(prev_pyramid);
             debug!("      [4] Seeded ({} seeds)", raw.len());
             raw
         };
@@ -816,7 +801,7 @@ impl<S: FeatureSeederTrait> ProcessingEngine<S> {
         debug!("      [4] Dropped near live: remaining {}", seeds.len());
 
         // Step 5: track candidates forward and evaluate quality
-        let mut candidates = Vec::with_capacity(seeds.len());
+        let mut candidates: Vec<TrackObservation> = Vec::with_capacity(seeds.len());
         for seed in seeds.iter() {
             let mut observation = self.tracker.track_with_prior(
                 prev_pyramid,
@@ -860,6 +845,7 @@ impl<S: FeatureSeederTrait> ProcessingEngine<S> {
             }
             TrackingState::TrackingPreInit => {
                 // Second frame onwards: try two-view initialization
+                let _span = debug_span!("estimate_pose two_view_initialization").entered();
                 info!(target: "arbit_engine", "      [6] Pose: TrackingPreInit (map: {} landmarks, {} keyframes)",
                       self.map.landmark_count(), self.map.keyframe_count());
 
@@ -876,43 +862,9 @@ impl<S: FeatureSeederTrait> ProcessingEngine<S> {
                 }
             }
             TrackingState::Tracking => {
-                // Map initialized: use PnP for pose estimation
-                info!(target: "arbit_engine", "      [6] Pose: Tracking with PnP (map: {} landmarks)", self.map.landmark_count());
-
+                let _span = debug_span!("estimate_pose pnp_tracking").entered();
                 self.run_pnp_tracking();
             }
-        }
-    }
-
-    /// Step 7 & 8: Build scene descriptor and update visual odometry monitoring.
-    fn step_visual_odometry(&mut self) {
-        let Some(intrinsics) = self.current_frame().map(|f| &f.intrinsics) else {
-            return;
-        };
-
-        let Some(tracks) = self.current_frame().map(|f| &f.tracks) else {
-            return;
-        };
-        let Some(timestamp_seconds) = self.current_frame().map(|f| f.timestamp_seconds) else {
-            return;
-        };
-
-        let descriptor_current = {
-            let _span = debug_span!("build_descriptor").entered();
-            let descriptor_current = build_descriptor(
-                &tracks,
-                intrinsics.width,
-                intrinsics.height,
-                DescriptorSample::Refined,
-            );
-            debug!("      [7] Descriptor");
-            descriptor_current
-        };
-
-        {
-            let _span = debug_span!("update_vo_monitor").entered();
-            self.update_visual_odometry(timestamp_seconds, &descriptor_current);
-            debug!("      [8] VO Monitor");
         }
     }
 
@@ -926,51 +878,38 @@ impl<S: FeatureSeederTrait> ProcessingEngine<S> {
         let _span = debug_span!("two_view_initialization").entered();
 
         // Extract and clone data from frame window to avoid borrowing issues
-        let Some(curr_frame) = self.current_frame() else {
+        let Some(curr_frame) = self.keyframe_window.front() else {
             debug!("No current frame available for two-view initialization");
             return;
         };
 
         // Try to find a good frame pair for initialization
-        let mut two_view_result: Option<(
-            TwoViewInitialization,
-            Vec<TrackObservation>,
-            Vec<(u64, FeatureMatch)>,
-            CameraIntrinsics,
-        )> = None;
+        let mut two_view_result: Option<(TwoViewInitialization, CameraIntrinsics)> = None;
 
-        for frame_i in 1..self.config.two_view_max_lookback {
-            let Some(older_frame) = self.frame_window.get(frame_i) else {
+        for frame_i in 1..self.keyframe_window.len() {
+            let Some(older_keyframe) = self.keyframe_window.get(frame_i) else {
                 debug!("No older frame available for two-view initialization");
                 return;
             };
-            let prev_intrinsics = &older_frame.intrinsics;
-            let curr_intrinsics = &curr_frame.intrinsics;
+            let prev_intrinsics = &older_keyframe.frame_data.intrinsics;
 
             // Track features from older frame to current frame
-            let mut tracks = Vec::with_capacity(older_frame.seeds.len());
-            for seed in older_frame.seeds.iter() {
-                let observation = self.tracker.track_with_prior(
-                    &older_frame.pyramid,
-                    &curr_frame.pyramid,
-                    seed.position,
-                    None,
-                    Some(&older_frame.intrinsics),
-                );
-                tracks.push(observation);
-            }
+            let matches_res = self
+                .feat_matcher
+                .match_feats(&older_keyframe.descriptors, &curr_frame.descriptors);
 
-            // Build feature matches for geometric estimation
-            let matches_indexed = {
-                let _match_span = debug_span!("feature_matching").entered();
-                let result = build_feature_matches(&tracks, &prev_intrinsics, &curr_intrinsics);
-                debug!("      Feature matching: ({} matches)", result.len());
-                result
-            };
-
-            let matches: Vec<FeatureMatch> = matches_indexed
+            let matches: Vec<FeatureMatch> = matches_res
                 .iter()
-                .map(|(_, feature)| *feature)
+                .map(|m| FeatureMatch {
+                    normalized_a: older_keyframe.descriptors[m.query_idx]
+                        .seed
+                        .position
+                        .cast::<f64>(),
+                    normalized_b: curr_frame.descriptors[m.train_idx]
+                        .seed
+                        .position
+                        .cast::<f64>(),
+                })
                 .collect();
 
             if matches.len() < 8 {
@@ -994,8 +933,7 @@ impl<S: FeatureSeederTrait> ProcessingEngine<S> {
 
             if let Some(two_view) = two_view {
                 // Success! Store the results and break from the loop
-                two_view_result =
-                    Some((two_view, tracks, matches_indexed, prev_intrinsics.clone()));
+                two_view_result = Some((two_view, prev_intrinsics.clone()));
                 break;
             } else {
                 warn!(target: "arbit_engine", "⚠️  Two-view FAILED - trying next frame pair");
@@ -1004,7 +942,7 @@ impl<S: FeatureSeederTrait> ProcessingEngine<S> {
         }
 
         // Check if we found a valid initialization
-        let Some((two_view, tracks, matches_indexed, prev_intrinsics)) = two_view_result else {
+        let Some((two_view, prev_intrinsics)) = two_view_result else {
             debug!("No valid frame pair found for two-view initialization");
             return;
         };
@@ -1028,31 +966,6 @@ impl<S: FeatureSeederTrait> ProcessingEngine<S> {
         self.current_pose = initial_pose.clone();
 
         info!(target: "arbit_engine", "   Initial pose set to T_cam_world (inverted gravity alignment)");
-
-        // NOW build descriptor (only after successful two-view initialization)
-        let descriptor_prev = {
-            let _span = debug_span!("build_descriptor").entered();
-            let result = build_descriptor(
-                &tracks,
-                prev_intrinsics.width,
-                prev_intrinsics.height,
-                DescriptorSample::Initial,
-            );
-            debug!("      Descriptor build");
-            result
-        };
-
-        // Insert first keyframe at aligned origin
-        {
-            let _span = debug_span!("keyframe_insertion").entered();
-            self.try_insert_keyframe_with_landmarks(
-                &initial_pose,
-                descriptor_prev,
-                &scaled_two_view,
-                &matches_indexed,
-            );
-            debug!("      Keyframe insertion");
-        }
 
         // Update pose for second frame
         self.current_pose = update_pose(&initial_pose, &scaled_two_view);
@@ -1193,370 +1106,6 @@ impl<S: FeatureSeederTrait> ProcessingEngine<S> {
             let trim = self.trajectory.len() - self.config.max_trajectory_points;
             self.trajectory.drain(0..trim);
         }
-
-        // LOCAL MAPPING: Expand the map with new landmarks
-        self.expand_map_with_new_features(&tracks, &intrinsics);
-    }
-
-    // ========================================================================
-    // LOCAL MAPPING: Map Expansion & Keyframe Management
-    // ========================================================================
-
-    /// Expands the map by triangulating new features and inserting keyframes.
-    /// This is the "local mapping" component that keeps the map growing as the camera explores.
-    fn expand_map_with_new_features(
-        &mut self,
-        tracks: &[TrackObservation],
-        intrinsics: &CameraIntrinsics,
-    ) {
-        // Get the last keyframe pose for triangulation
-        let Some(last_kf_pose) = self.map.last_keyframe_pose().cloned() else {
-            return;
-        };
-
-        // Identify new features (tracks without landmark IDs)
-        let mut new_landmarks_added = 0;
-        let mut new_landmark_mappings = Vec::new();
-
-        for track in tracks.iter() {
-            if !matches!(track.outcome, TrackOutcome::Converged) {
-                continue;
-            }
-
-            let Some(track_id) = track.id else {
-                continue;
-            };
-
-            // Skip if this track already has a landmark
-            if self.tracked_landmark_ids.contains_key(&track_id) {
-                continue;
-            }
-
-            // Triangulate new feature using last keyframe pose and current pose
-            let normalized_initial = normalize_pixel(track.initial, intrinsics);
-            let normalized_refined = normalize_pixel(track.refined, intrinsics);
-
-            if let Some(world_point) = triangulate_with_poses(
-                &last_kf_pose,
-                &self.current_pose,
-                normalized_initial,
-                normalized_refined,
-            ) {
-                // Validate the triangulated point (reasonable depth)
-                let depth = self.current_pose.transform_point(&world_point).z;
-                if depth > 0.1 && depth < 100.0 {
-                    // Add to map
-                    let landmark_id = self.map.add_landmark(world_point);
-                    new_landmark_mappings.push((track_id, landmark_id));
-                    new_landmarks_added += 1;
-                }
-            }
-        }
-
-        // Update tracked landmark IDs
-        for (track_id, landmark_id) in new_landmark_mappings {
-            self.tracked_landmark_ids.insert(track_id, landmark_id);
-        }
-
-        if new_landmarks_added > 0 {
-            info!(
-                target: "arbit_engine",
-                "🗺️  Local mapping: added {} new landmarks (total: {}, tracked_ids: {})",
-                new_landmarks_added,
-                self.map.landmark_count(),
-                self.tracked_landmark_ids.len()
-            );
-        }
-
-        // Insert new keyframe if we've moved enough
-        if self.map.should_insert_keyframe(&self.current_pose) {
-            info!(target: "arbit_engine", "📸 Inserting new keyframe during tracking");
-            self.insert_keyframe_from_tracking(tracks, intrinsics);
-        }
-    }
-
-    /// Inserts a new keyframe during tracking to anchor the map at the current location.
-    fn insert_keyframe_from_tracking(
-        &mut self,
-        tracks: &[TrackObservation],
-        intrinsics: &CameraIntrinsics,
-    ) {
-        let descriptor = build_descriptor(
-            tracks,
-            intrinsics.width,
-            intrinsics.height,
-            DescriptorSample::Refined,
-        );
-
-        // Collect features that have known landmark IDs
-        let mut features = Vec::new();
-
-        for track in tracks.iter() {
-            if !matches!(track.outcome, TrackOutcome::Converged) {
-                continue;
-            }
-
-            let Some(track_id) = track.id else {
-                continue;
-            };
-
-            if let Some(&landmark_id) = self.tracked_landmark_ids.get(&track_id) {
-                if let Some(landmark) = self.map.landmark(landmark_id) {
-                    let normalized = Vector2::new(
-                        normalize_pixel(track.refined, intrinsics).x as f32,
-                        normalize_pixel(track.refined, intrinsics).y as f32,
-                    );
-                    features.push((normalized, landmark.position, landmark_id));
-                }
-            }
-        }
-
-        if features.len() < self.config.min_keyframe_landmarks {
-            debug!(
-                "Insufficient landmarks for keyframe during tracking ({} < {})",
-                features.len(),
-                self.config.min_keyframe_landmarks
-            );
-            return;
-        }
-
-        let feature_count = features.len();
-
-        // Insert keyframe with existing landmark IDs
-        self.map.insert_keyframe_with_id(
-            self.last_keyframe_id.map(|id| id + 1).unwrap_or(1),
-            self.current_pose.clone(),
-            descriptor.descriptor,
-            features,
-        );
-
-        self.last_keyframe_id = self.map.max_keyframe_id();
-
-        info!(
-            "Inserted keyframe during tracking with {} features",
-            feature_count
-        );
-    }
-
-    /// Inserts keyframe and maintains landmark-to-track mapping for PnP tracking
-    fn try_insert_keyframe_with_landmarks(
-        &mut self,
-        prev_pose: &TransformSE3,
-        descriptor_info: DescriptorInfo,
-        two_view: &TwoViewInitialization,
-        matches_indexed: &[(u64, FeatureMatch)],
-    ) {
-        if !self.map.should_insert_keyframe(prev_pose) {
-            debug!("Keyframe gating rejected pose insertion");
-            return;
-        }
-
-        let DescriptorInfo {
-            descriptor,
-            normalized_points,
-            converged_tracks,
-            ..
-        } = descriptor_info;
-
-        if converged_tracks < self.config.min_keyframe_landmarks {
-            debug!(
-                "Insufficient converged tracks for keyframe ({} < {})",
-                converged_tracks, self.config.min_keyframe_landmarks
-            );
-            return;
-        }
-
-        if two_view.landmarks.len() < self.config.min_keyframe_landmarks {
-            debug!(
-                "Two-view result provided {} landmarks (need {})",
-                two_view.landmarks.len(),
-                self.config.min_keyframe_landmarks
-            );
-            return;
-        }
-
-        let normalized_lookup: HashMap<u64, Vector2<f32>> = normalized_points.into_iter().collect();
-        let match_to_track: Vec<u64> = matches_indexed
-            .iter()
-            .map(|(track_id, _)| *track_id)
-            .collect();
-
-        let mut features = Vec::new();
-        let mut track_to_match: HashMap<u64, usize> = HashMap::new();
-
-        for (match_idx, landmark) in &two_view.landmarks {
-            if let Some(&track_id) = match_to_track.get(*match_idx) {
-                if let Some(normalized) = normalized_lookup.get(&track_id) {
-                    // Two-view landmarks are in Frame 0's camera space
-                    // prev_pose = T_cam_world (after Bug #1 fix)
-                    // To transform camera → world: use inverse
-                    // landmark_world = T_world_cam * landmark_cam
-                    let world_point = prev_pose.inverse().transform_point(landmark);
-                    features.push((*normalized, world_point));
-                    track_to_match.insert(track_id, *match_idx);
-                }
-            }
-        }
-
-        if features.len() < self.config.min_keyframe_landmarks {
-            debug!(
-                "Matched landmarks below threshold ({} < {})",
-                features.len(),
-                self.config.min_keyframe_landmarks
-            );
-            return;
-        }
-
-        // Get the starting landmark ID before insertion
-        let starting_landmark_id = self.map.landmark_count() as u64;
-
-        if let Some(_keyframe_id) =
-            self.map
-                .insert_keyframe(prev_pose.clone(), descriptor, features.clone())
-        {
-            info!(
-                target: "arbit_engine",
-                "📸 Committed keyframe {} with {} landmarks (starting ID: {})",
-                _keyframe_id,
-                features.len(),
-                starting_landmark_id
-            );
-
-            // Log some sample landmark positions
-            if !features.is_empty() {
-                let sample = &features[0].1;
-                info!(target: "arbit_engine", "   Sample landmark world pos: [{:.3}, {:.3}, {:.3}]",
-                      sample.x, sample.y, sample.z);
-            }
-
-            self.last_keyframe_id = Some(_keyframe_id);
-
-            // Update landmark tracking: map track indices to landmark IDs
-            self.tracked_landmark_ids.clear();
-            for (feature_idx, (track_id, _match_idx)) in track_to_match.iter().enumerate() {
-                let landmark_id = starting_landmark_id + feature_idx as u64;
-                self.tracked_landmark_ids.insert(*track_id, landmark_id);
-            }
-
-            info!(
-                target: "arbit_engine",
-                "🔗 Initialized {} tracked landmarks for PnP",
-                self.tracked_landmark_ids.len()
-            );
-        }
-    }
-
-    // ========================================================================
-    // VISUAL ODOMETRY & RELOCALIZATION
-    // ========================================================================
-
-    /// Update visual odometry monitoring and attempt relocalization if tracking is lost.
-    fn update_visual_odometry(&mut self, timestamp_seconds: f64, descriptor_info: &DescriptorInfo) {
-        if descriptor_info.total_tracks == 0 {
-            self.frame_index = self.frame_index.saturating_add(1);
-            return;
-        }
-
-        let observation = FrameObservation {
-            frame_index: self.frame_index,
-            timestamp_seconds,
-            pose: self.current_pose.clone(),
-            track_count: descriptor_info.total_tracks,
-            inlier_ratio: descriptor_info.inlier_ratio(),
-            forward_backward_error: descriptor_info.average_residual,
-        };
-
-        let status = self.vo_loop.process(observation);
-        self.frame_index = self.frame_index.saturating_add(1);
-
-        if matches!(status, VoStatus::Lost) {
-            debug!("VO reported loss; attempting relocalization");
-            if let Some(result) = self.attempt_relocalization(descriptor_info) {
-                self.current_pose = result.pose.clone();
-                self.last_two_view = None;
-                self.last_relocalization = Some(result.clone());
-                self.trajectory.push(self.current_pose.translation.vector);
-                if self.trajectory.len() > self.config.max_trajectory_points {
-                    let trim = self.trajectory.len() - self.config.max_trajectory_points;
-                    self.trajectory.drain(0..trim);
-                }
-                self.vo_loop.reset();
-                info!(
-                    "Relocalized with {} inliers (avg reprojection {:.4})",
-                    result.inliers.len(),
-                    result.average_reprojection_error
-                );
-            }
-        }
-    }
-
-    fn attempt_relocalization(&self, descriptor_info: &DescriptorInfo) -> Option<PnPResult> {
-        if descriptor_info.normalized_points.is_empty() || self.map.is_empty() {
-            return None;
-        }
-
-        let descriptor = descriptor_info.descriptor.clone();
-        let candidates = self
-            .map
-            .query(&descriptor, self.config.relocalization_candidates);
-        if candidates.is_empty() {
-            return None;
-        }
-
-        for candidate in candidates {
-            let observations =
-                self.build_pnp_observations(candidate, &descriptor_info.normalized_points);
-            debug!(
-                "Keyframe {} yielded {} candidate observations",
-                candidate.id,
-                observations.len()
-            );
-            if observations.len() < self.config.relocalization_min_inliers {
-                continue;
-            }
-            if let Some(result) = self.pnp.estimate(&observations) {
-                return Some(result);
-            }
-        }
-
-        None
-    }
-
-    fn build_pnp_observations(
-        &self,
-        keyframe: &KeyframeData,
-        points: &[(u64, Vector2<f32>)],
-    ) -> Vec<PnPObservation> {
-        let mut used = HashSet::new();
-        let mut observations = Vec::new();
-
-        for (_, normalized) in points {
-            let cell = map::cell_for_normalized(normalized);
-            let mut best: Option<(f32, &map::KeyframeFeature)> = None;
-            for feature in keyframe.features_in_cell(cell) {
-                if used.contains(&feature.landmark_id) {
-                    continue;
-                }
-                let dist = (feature.normalized - *normalized).norm();
-                if dist > self.config.relocalization_cell_threshold {
-                    continue;
-                }
-                match best {
-                    Some((current, _)) if current <= dist => {}
-                    _ => best = Some((dist, feature)),
-                }
-            }
-
-            if let Some((_, feature)) = best {
-                used.insert(feature.landmark_id);
-                observations.push(PnPObservation {
-                    world_point: feature.world,
-                    normalized_image: Vector2::new(normalized.x as f64, normalized.y as f64),
-                });
-            }
-        }
-
-        observations
     }
 
     fn encode_luma(&self, level: &PyramidLevel) -> Vec<u8> {
@@ -1733,7 +1282,7 @@ fn align_world_to_gravity(gravity: &GravityEstimate) -> TransformSE3 {
     TransformSE3::from_parts(Translation3::identity(), rotation.into())
 }
 
-impl Default for ProcessingEngine<FastSeeder> {
+impl Default for ProcessingEngine<FastSeeder, OrbDescriptor> {
     fn default() -> Self {
         Self::new()
     }

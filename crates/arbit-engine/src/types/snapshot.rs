@@ -1,5 +1,5 @@
 use crate::ProcessingEngine;
-use arbit_core::track::FeatureSeederTrait;
+use arbit_core::track::{DescriptorBuffer, FeatDescriptorExtractor, FeatureSeederTrait};
 use nalgebra::Vector3;
 use serde::{Deserialize, Serialize};
 
@@ -73,8 +73,8 @@ pub struct TrajectoryPoint {
 
 impl EngineSnapshot {
     /// Create a snapshot from the current engine state
-    pub fn from_engine<S: FeatureSeederTrait>(
-        engine: &ProcessingEngine<S>,
+    pub fn from_engine<S: FeatureSeederTrait, D: FeatDescriptorExtractor>(
+        engine: &ProcessingEngine<S, D>,
         timestamp: f64,
         frame_index: u64,
     ) -> Self {
@@ -90,7 +90,9 @@ impl EngineSnapshot {
 }
 
 impl TrackingMetrics {
-    pub fn from_engine<S: FeatureSeederTrait>(engine: &ProcessingEngine<S>) -> Self {
+    pub fn from_engine<S: FeatureSeederTrait, D: FeatDescriptorExtractor>(
+        engine: &ProcessingEngine<S, D>,
+    ) -> Self {
         let tracks = engine.tracked_points();
         let total_tracks = tracks.len();
 
@@ -124,7 +126,9 @@ impl TrackingMetrics {
 }
 
 impl ImuMetrics {
-    pub fn from_engine<S: FeatureSeederTrait>(engine: &ProcessingEngine<S>) -> Self {
+    pub fn from_engine<S: FeatureSeederTrait, D: FeatDescriptorExtractor>(
+        engine: &ProcessingEngine<S, D>,
+    ) -> Self {
         let gravity_estimate = engine.gravity_estimate().map(|g| {
             let down = g.down().into_inner();
             [down.x, down.y, down.z]
@@ -147,7 +151,9 @@ impl ImuMetrics {
 }
 
 impl MapMetrics {
-    pub fn from_engine<S: FeatureSeederTrait>(engine: &ProcessingEngine<S>) -> Self {
+    pub fn from_engine<S: FeatureSeederTrait, D: FeatDescriptorExtractor>(
+        engine: &ProcessingEngine<S, D>,
+    ) -> Self {
         let (keyframe_count, landmark_count, anchor_count) = engine.map_stats();
 
         Self {
@@ -159,7 +165,9 @@ impl MapMetrics {
 }
 
 impl PoseSnapshot {
-    pub fn from_engine<S: FeatureSeederTrait>(engine: &ProcessingEngine<S>) -> Self {
+    pub fn from_engine<S: FeatureSeederTrait, D: FeatDescriptorExtractor>(
+        engine: &ProcessingEngine<S, D>,
+    ) -> Self {
         let pose = engine.current_pose();
         let quat = pose.rotation.quaternion();
 

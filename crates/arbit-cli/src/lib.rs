@@ -10,6 +10,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use arbit_core::track::FastSeeder;
+use arbit_core::track::OrbDescriptor;
 use arbit_engine::ProcessingEngine;
 use log::{debug, info};
 
@@ -22,7 +23,7 @@ use crate::video::VideoDecoder;
 
 /// Video processor that runs the ARBIT engine on recorded sessions
 pub struct VideoProcessor {
-    engine: Arc<RwLock<ProcessingEngine<FastSeeder>>>,
+    engine: Arc<RwLock<ProcessingEngine<FastSeeder, OrbDescriptor>>>,
     provider: VideoCameraProvider,
     config: ProcessingConfig,
 }
@@ -37,7 +38,7 @@ impl VideoProcessor {
     }
 
     /// Get a reference to the shared engine (useful for debug server)
-    pub fn engine(&self) -> Arc<RwLock<ProcessingEngine<FastSeeder>>> {
+    pub fn engine(&self) -> Arc<RwLock<ProcessingEngine<FastSeeder, OrbDescriptor>>> {
         Arc::clone(&self.engine)
     }
 

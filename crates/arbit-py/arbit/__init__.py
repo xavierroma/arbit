@@ -3,7 +3,7 @@ Arbit Python bindings - Visual-Inertial SLAM engine
 """
 
 from .engine import ArbitEngine, CameraFrame, ImuSample
-from .types import PixelFormat, MotionState, TrackStatus, Transform, FrameState, ImuState
+from .types import PixelFormat, MotionState, TrackStatus, Transform, FrameState, ImuState, FeatDescriptor, Match
 
 __all__ = [
     "ArbitEngine",
@@ -15,6 +15,8 @@ __all__ = [
     "Transform",
     "FrameState",
     "ImuState",
+    "FeatDescriptor",
+    "Match",
     "init_logging",
 ]
 
@@ -36,4 +38,3 @@ def init_logging(verbose: bool = True):
         >>> engine = arbit.ArbitEngine()
     """
     ArbitEngine.init_logging(verbose=verbose)
-

@@ -1,4 +1,4 @@
-use crate::img::pyramid::PyramidLevel;
+use crate::img::{Pyramid, pyramid::PyramidLevel};
 use crate::track::seed::utils::radius_nms;
 use crate::track::seed::{FeatureSeed, FeatureSeederTrait};
 use log::debug;
@@ -111,7 +111,8 @@ impl ShiTomasiSeeder {
 }
 
 impl FeatureSeederTrait for ShiTomasiSeeder {
-    fn seed(&self, level: &PyramidLevel) -> Vec<FeatureSeed> {
+    fn seed(&self, pyramid: &Pyramid) -> Vec<FeatureSeed> {
+        let level = &pyramid.levels()[0];
         let width = level.image.width();
         let height = level.image.height();
 
@@ -257,7 +258,6 @@ mod tests {
         }
         let gray = ImageBuffer::from_bgra8(&bytes, width, height, width * 4);
         let pyramid = build_pyramid(&gray, 1);
-        let level = &pyramid.levels()[0];
 
         let seeder = ShiTomasiSeeder::new(ShiTomasiGridConfig {
             cell_size: 8,
@@ -268,7 +268,7 @@ mod tests {
             window_radius: 1,
         });
 
-        let seeds = seeder.seed(level);
+        let seeds = seeder.seed(&pyramid);
         assert!(!seeds.is_empty());
         assert!(seeds.len() <= 16);
         for seed in seeds {

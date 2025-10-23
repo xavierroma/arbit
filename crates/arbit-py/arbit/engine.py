@@ -12,6 +12,7 @@ from .types import (
     ArbitCameraFrame,
     ArbitCameraIntrinsics,
     ArbitCameraSample,
+    ArbitFeatDescriptor,
     ArbitImuSample,
     ArbitFrameState,
     ArbitImuState,
@@ -20,10 +21,13 @@ from .types import (
     ArbitTransform,
     ArbitProjectedAnchor,
     ArbitProjectedLandmark,
+    ArbitMatch,
     PixelFormat,
     Transform,
     FrameState,
     ImuState,
+    FeatDescriptor,
+    Match,
 )
 
 
@@ -175,36 +179,49 @@ class ArbitEngine:
         # Tracking queries
         lib.arbit_get_tracked_points.argtypes = [c_void_p, POINTER(ArbitTrackedPoint), c_ulong]
         lib.arbit_get_tracked_points.restype = c_ulong
+
+        lib.arbit_get_descriptors.argtypes = [c_void_p, POINTER(ArbitFeatDescriptor), c_ulong]
+        lib.arbit_get_descriptors.restype = c_ulong
         
+        lib.arbit_match_descriptors.argtypes = [
+            POINTER(ArbitFeatDescriptor), c_ulong,  # query descriptors
+            POINTER(ArbitFeatDescriptor), c_ulong,  # train descriptors
+            POINTER(ArbitMatch), c_ulong,            # output matches
+            c_bool,                                   # cross_check
+            ctypes.c_uint32,                         # max_distance
+        ]
+        lib.arbit_match_descriptors.restype = c_ulong
+
         lib.arbit_get_trajectory.argtypes = [c_void_p, POINTER(ArbitPoseSample), c_ulong]
         lib.arbit_get_trajectory.restype = c_ulong
+
         
-        # Anchor management
-        lib.arbit_create_anchor.argtypes = [c_void_p, POINTER(ArbitTransform), POINTER(c_uint64)]
-        lib.arbit_create_anchor.restype = c_bool
+        # # Anchor management
+        # lib.arbit_create_anchor.argtypes = [c_void_p, POINTER(ArbitTransform), POINTER(c_uint64)]
+        # lib.arbit_create_anchor.restype = c_bool
         
-        lib.arbit_get_anchor.argtypes = [c_void_p, c_uint64, POINTER(ArbitTransform)]
-        lib.arbit_get_anchor.restype = c_bool
+        # lib.arbit_get_anchor.argtypes = [c_void_p, c_uint64, POINTER(ArbitTransform)]
+        # lib.arbit_get_anchor.restype = c_bool
         
-        lib.arbit_place_anchor_at_screen_point.argtypes = [
-            c_void_p, c_double, c_double, c_double, POINTER(c_uint64)
-        ]
-        lib.arbit_place_anchor_at_screen_point.restype = c_bool
+        # lib.arbit_place_anchor_at_screen_point.argtypes = [
+        #     c_void_p, c_double, c_double, c_double, POINTER(c_uint64)
+        # ]
+        # lib.arbit_place_anchor_at_screen_point.restype = c_bool
         
-        lib.arbit_get_visible_anchors.argtypes = [c_void_p, POINTER(ArbitProjectedAnchor), c_ulong]
-        lib.arbit_get_visible_anchors.restype = c_ulong
+        # lib.arbit_get_visible_anchors.argtypes = [c_void_p, POINTER(ArbitProjectedAnchor), c_ulong]
+        # lib.arbit_get_visible_anchors.restype = c_ulong
         
-        lib.arbit_get_visible_landmarks.argtypes = [
-            c_void_p, POINTER(ArbitProjectedLandmark), c_ulong
-        ]
-        lib.arbit_get_visible_landmarks.restype = c_ulong
+        # lib.arbit_get_visible_landmarks.argtypes = [
+        #     c_void_p, POINTER(ArbitProjectedLandmark), c_ulong
+        # ]
+        # lib.arbit_get_visible_landmarks.restype = c_ulong
         
-        # Map I/O
-        lib.arbit_save_map.argtypes = [c_void_p, c_void_p, c_ulong, POINTER(c_ulong)]
-        lib.arbit_save_map.restype = c_bool
+        # # Map I/O
+        # lib.arbit_save_map.argtypes = [c_void_p, c_void_p, c_ulong, POINTER(c_ulong)]
+        # lib.arbit_save_map.restype = c_bool
         
-        lib.arbit_load_map.argtypes = [c_void_p, c_void_p, c_ulong]
-        lib.arbit_load_map.restype = c_bool
+        # lib.arbit_load_map.argtypes = [c_void_p, c_void_p, c_ulong]
+        # lib.arbit_load_map.restype = c_bool
     
     def __del__(self):
         """Cleanup on destruction"""
@@ -268,7 +285,7 @@ class ArbitEngine:
     def get_trajectory(self, max_points: int = 2048) -> np.ndarray:
         """
         Get camera trajectory
-        
+
         Args:
             max_points: Maximum number of trajectory points to return
             
@@ -277,12 +294,80 @@ class ArbitEngine:
         """
         points = (ArbitPoseSample * max_points)()
         count = self._lib.arbit_get_trajectory(self._handle, points, max_points)
-        
+
         trajectory = np.zeros((count, 3))
         for i in range(count):
             trajectory[i] = [points[i].x, points[i].y, points[i].z]
-        
+
         return trajectory
+
+    def get_descriptors(self, max_descriptors: int = 1024) -> List[FeatDescriptor]:
+        """
+        Get feature descriptors from the most recent keyframe
+
+        Args:
+            max_descriptors: Maximum number of descriptors to return
+
+        Returns:
+            List of `FeatDescriptor` wrappers containing 32-byte descriptor data
+        """
+        buffer = (ArbitFeatDescriptor * max_descriptors)()
+        count = self._lib.arbit_get_descriptors(self._handle, buffer, max_descriptors)
+        return [FeatDescriptor(buffer[i]) for i in range(count)]
+    
+    @staticmethod
+    def match_descriptors(
+        query_descriptors: List[FeatDescriptor],
+        train_descriptors: List[FeatDescriptor],
+        cross_check: bool = True,
+        max_distance: int = 80,
+        max_matches: int = 2048,
+    ) -> List[Match]:
+        """
+        Match two sets of feature descriptors using Hamming distance
+        
+        Args:
+            query_descriptors: Query descriptor list (e.g., from current keyframe)
+            train_descriptors: Train descriptor list (e.g., from previous keyframe)
+            cross_check: Enable cross-check matching (mutual nearest neighbors)
+            max_distance: Maximum Hamming distance threshold (0 = no filtering)
+            max_matches: Maximum number of matches to return
+            
+        Returns:
+            List of Match objects containing matched descriptor indices and positions
+            
+        Example:
+            >>> descriptors_kf1 = engine.get_descriptors()
+            >>> # ... process more frames ...
+            >>> descriptors_kf2 = engine.get_descriptors()
+            >>> matches = ArbitEngine.match_descriptors(descriptors_kf1, descriptors_kf2)
+        """
+        # Convert Python FeatDescriptor wrappers back to ctypes structures
+        query_buffer = (ArbitFeatDescriptor * len(query_descriptors))()
+        for i, desc in enumerate(query_descriptors):
+            query_buffer[i] = desc._native
+            
+        train_buffer = (ArbitFeatDescriptor * len(train_descriptors))()
+        for i, desc in enumerate(train_descriptors):
+            train_buffer[i] = desc._native
+        
+        # Allocate output buffer
+        matches_buffer = (ArbitMatch * max_matches)()
+        
+        # Load library (static method, so we need to get it)
+        lib = ctypes.CDLL(str(find_library()))
+        
+        # Call FFI function
+        count = lib.arbit_match_descriptors(
+            query_buffer, len(query_descriptors),
+            train_buffer, len(train_descriptors),
+            matches_buffer, max_matches,
+            cross_check,
+            max_distance,
+        )
+        
+        # Convert to Python-friendly Match objects
+        return [Match(matches_buffer[i]) for i in range(count)]
     
     def create_anchor(self, transform: Optional[Transform] = None) -> int:
         """
@@ -498,4 +583,3 @@ class ImuSample:
         sample.accel_x, sample.accel_y, sample.accel_z = self.accel
         sample.gyro_x, sample.gyro_y, sample.gyro_z = self.gyro
         return sample
-

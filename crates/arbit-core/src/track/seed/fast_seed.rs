@@ -1,5 +1,8 @@
 use super::{FeatureGridConfig, FeatureSeed, FeatureSeederTrait};
-use crate::{img::pyramid::PyramidLevel, track::seed::utils::radius_nms};
+use crate::{
+    img::{Pyramid, pyramid::PyramidLevel},
+    track::seed::utils::radius_nms,
+};
 use log::{debug, trace};
 use nalgebra::Vector2;
 
@@ -110,7 +113,8 @@ impl FastSeeder {
 }
 
 impl FeatureSeederTrait for FastSeeder {
-    fn seed(&self, level: &PyramidLevel) -> Vec<FeatureSeed> {
+    fn seed(&self, pyramid: &Pyramid) -> Vec<FeatureSeed> {
+        let level = &pyramid.levels()[0];
         let width = level.image.width();
         let height = level.image.height();
         let grid_cfg = self.config.grid;
@@ -444,14 +448,13 @@ mod tests {
         }
         let gray = ImageBuffer::from_bgra8(&bytes, width, height, width * 4);
         let pyramid = build_pyramid(&gray, 1);
-        let level = &pyramid.levels()[0];
 
         let seeder = FastSeeder::new(FastSeederConfig {
             grid: FeatureGridConfig::default(),
             detector: FastDetectorConfig::default(),
         });
 
-        let seeds = seeder.seed(level);
+        let seeds = seeder.seed(&pyramid);
         assert!(!seeds.is_empty(), "expected FAST seeder to find corners");
         assert!(seeds.len() <= 32);
         assert!(seeds.iter().all(|s| s.score >= 5.0));

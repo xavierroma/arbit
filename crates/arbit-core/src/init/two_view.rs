@@ -26,7 +26,7 @@ impl Default for TwoViewInitializationParams {
             ransac_threshold: 1e-3,
             ransac_sample_size: 8,
             min_matches: 100,
-            min_parallax: 10.0,
+            min_parallax: 3.0,
         }
     }
 }

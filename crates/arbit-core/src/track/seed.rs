@@ -1,4 +1,4 @@
-use crate::img::PyramidLevel;
+use crate::img::Pyramid;
 use nalgebra::Vector2;
 
 pub mod fast_seed;
@@ -40,5 +40,5 @@ pub struct FeatureSeed {
 }
 
 pub trait FeatureSeederTrait {
-    fn seed(&self, level: &PyramidLevel) -> Vec<FeatureSeed>;
+    fn seed(&self, pyramid: &Pyramid) -> Vec<FeatureSeed>;
 }

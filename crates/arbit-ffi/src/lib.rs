@@ -6,17 +6,21 @@ use std::time::Duration;
 use arbit_core::math::CameraIntrinsics;
 use arbit_core::math::se3::TransformSE3;
 use arbit_core::time::FrameTimestamps;
-use arbit_core::track::FastSeeder;
-use arbit_core::track::FeatureSeederTrait;
-use arbit_core::track::TrackOutcome;
+use arbit_core::track::{
+    FastSeeder, FeatDescriptorExtractor, FeatureSeed, FeatureSeederTrait, OrbDescriptor,
+    TrackOutcome,
+};
 use arbit_engine::ProcessingEngine;
 use arbit_providers::{ArKitFrame, ArKitIntrinsics, CameraSample, IosCameraProvider, PixelFormat};
 use log::{info, warn};
 use nalgebra::{Matrix4, Translation3, UnitQuaternion, Vector3};
 use tracing_subscriber::{EnvFilter, fmt};
 
-struct CaptureContext<S: FeatureSeederTrait = FastSeeder> {
-    engine: ProcessingEngine<S>,
+struct CaptureContext<
+    S: FeatureSeederTrait = FastSeeder,
+    D: FeatDescriptorExtractor = OrbDescriptor,
+> {
+    engine: ProcessingEngine<S, D>,
     provider: IosCameraProvider,
 }
 
@@ -28,6 +32,8 @@ impl Default for CaptureContext {
         }
     }
 }
+
+const ORB_DESCRIPTOR_LEN: usize = OrbDescriptor::LEN;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -186,6 +192,30 @@ pub struct ArbitTrackedPoint {
     pub iterations: u32,
     pub status: ArbitTrackStatus,
     pub track_id: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct ArbitFeatDescriptor {
+    pub level: u32,
+    pub seed_x: f32,
+    pub seed_y: f32,
+    pub score: f32,
+    pub angle: f32,
+    pub data_len: usize,
+    pub data: [u8; ORB_DESCRIPTOR_LEN],
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct ArbitMatch {
+    pub query_idx: u32,
+    pub train_idx: u32,
+    pub distance: u32,
+    pub query_x: f32,
+    pub query_y: f32,
+    pub train_x: f32,
+    pub train_y: f32,
 }
 
 #[repr(C)]
@@ -769,6 +799,138 @@ pub unsafe extern "C" fn arbit_get_pyramid_levels(
             pixels_len: cache.pixels.len(),
         };
     }
+    count
+}
+
+/// Gets feature descriptors from the most recent keyframe
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arbit_get_descriptors(
+    handle: *mut ArbitCaptureContextHandle,
+    out_descriptors: *mut ArbitFeatDescriptor,
+    max_descriptors: usize,
+) -> usize {
+    if handle.is_null() || out_descriptors.is_null() || max_descriptors == 0 {
+        return 0;
+    }
+
+    let context = handle_to_context(handle);
+    let descriptors = context.engine.descriptors();
+    let count = descriptors.len().min(max_descriptors);
+    let dest = unsafe { slice::from_raw_parts_mut(out_descriptors, count) };
+
+    for (dst, descriptor) in dest.iter_mut().zip(descriptors.iter()) {
+        let seed = &descriptor.seed;
+        let bytes = descriptor.bytes();
+        debug_assert!(bytes.len() <= ORB_DESCRIPTOR_LEN);
+
+        dst.level = seed.level as u32;
+        dst.seed_x = seed.position.x;
+        dst.seed_y = seed.position.y;
+        dst.score = seed.score;
+        dst.angle = descriptor.angle;
+        dst.data_len = bytes.len();
+        dst.data = [0u8; ORB_DESCRIPTOR_LEN];
+        dst.data[..bytes.len()].copy_from_slice(bytes);
+    }
+
+    count
+}
+
+/// Matches two sets of feature descriptors using Hamming distance
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn arbit_match_descriptors(
+    query_descriptors: *const ArbitFeatDescriptor,
+    query_count: usize,
+    train_descriptors: *const ArbitFeatDescriptor,
+    train_count: usize,
+    out_matches: *mut ArbitMatch,
+    max_matches: usize,
+    cross_check: bool,
+    max_distance: u32,
+) -> usize {
+    if query_descriptors.is_null()
+        || train_descriptors.is_null()
+        || out_matches.is_null()
+        || query_count == 0
+        || train_count == 0
+        || max_matches == 0
+    {
+        return 0;
+    }
+
+    let query = unsafe { slice::from_raw_parts(query_descriptors, query_count) };
+    let train = unsafe { slice::from_raw_parts(train_descriptors, train_count) };
+    let dest = unsafe { slice::from_raw_parts_mut(out_matches, max_matches) };
+
+    use arbit_core::track::feat_descriptor::FeatDescriptor;
+    use arbit_core::track::feat_matcher::HammingFeatMatcher;
+    use nalgebra::Vector2;
+
+    // Convert FFI descriptors to internal format
+    let query_descriptors: Vec<FeatDescriptor<[u8; ORB_DESCRIPTOR_LEN]>> = query
+        .iter()
+        .map(|d| {
+            let mut data = [0u8; ORB_DESCRIPTOR_LEN];
+            let len = d.data_len.min(ORB_DESCRIPTOR_LEN);
+            data[..len].copy_from_slice(&d.data[..len]);
+            FeatDescriptor {
+                seed: FeatureSeed {
+                    level: d.level as usize,
+                    position: Vector2::new(d.seed_x, d.seed_y),
+                    score: d.score,
+                },
+                angle: d.angle,
+                data,
+            }
+        })
+        .collect();
+
+    let train_descriptors: Vec<FeatDescriptor<[u8; ORB_DESCRIPTOR_LEN]>> = train
+        .iter()
+        .map(|d| {
+            let mut data = [0u8; ORB_DESCRIPTOR_LEN];
+            let len = d.data_len.min(ORB_DESCRIPTOR_LEN);
+            data[..len].copy_from_slice(&d.data[..len]);
+            FeatDescriptor {
+                seed: FeatureSeed {
+                    level: d.level as usize,
+                    position: Vector2::new(d.seed_x, d.seed_y),
+                    score: d.score,
+                },
+                angle: d.angle,
+                data,
+            }
+        })
+        .collect();
+
+    // Create matcher with configuration
+    let matcher = HammingFeatMatcher {
+        cross_check,
+        max_distance: if max_distance > 0 {
+            Some(max_distance)
+        } else {
+            None
+        },
+        ratio_threshold: None, // Could expose this as parameter if needed
+    };
+
+    // Perform matching
+    let matches = matcher.match_feats(&query_descriptors, &train_descriptors);
+
+    // Convert matches to FFI format
+    let count = matches.len().min(max_matches);
+    for (i, m) in matches.iter().take(count).enumerate() {
+        dest[i] = ArbitMatch {
+            query_idx: m.query_idx as u32,
+            train_idx: m.train_idx as u32,
+            distance: m.distance,
+            query_x: query[m.query_idx].seed_x,
+            query_y: query[m.query_idx].seed_y,
+            train_x: train[m.train_idx].seed_x,
+            train_y: train[m.train_idx].seed_y,
+        };
+    }
+
     count
 }
 

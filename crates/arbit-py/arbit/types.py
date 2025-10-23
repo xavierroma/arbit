@@ -182,6 +182,78 @@ class ArbitTrackedPoint(Structure):
         ("track_id", c_uint64),
     ]
 
+class ArbitFeatDescriptor(Structure):
+    """Raw feature descriptor from the FFI layer"""
+    _fields_ = [
+        ("level", c_uint32),
+        ("seed_x", c_float),
+        ("seed_y", c_float),
+        ("score", c_float),
+        ("angle", c_float),
+        ("data_len", c_ulong),
+        ("data", c_uint8 * 32),
+    ]
+
+
+class ArbitMatch(Structure):
+    """Raw feature match from the FFI layer"""
+    _fields_ = [
+        ("query_idx", c_uint32),
+        ("train_idx", c_uint32),
+        ("distance", c_uint32),
+        ("query_x", c_float),
+        ("query_y", c_float),
+        ("train_x", c_float),
+        ("train_y", c_float),
+    ]
+
+
+class FeatDescriptor:
+    """Python-friendly feature descriptor wrapper"""
+
+    def __init__(self, native: ArbitFeatDescriptor):
+        self._native = native
+
+    @property
+    def level(self) -> int:
+        """Image pyramid level where the feature was detected"""
+        return int(self._native.level)
+
+    @property
+    def position(self) -> np.ndarray:
+        """Feature position `(x, y)` in pixel coordinates"""
+        return np.array([self._native.seed_x, self._native.seed_y], dtype=np.float32)
+
+    @property
+    def score(self) -> float:
+        """Detector response score"""
+        return float(self._native.score)
+
+    @property
+    def angle(self) -> float:
+        """Descriptor orientation in radians"""
+        return float(self._native.angle)
+
+    @property
+    def angle_degrees(self) -> float:
+        """Descriptor orientation in degrees"""
+        return float(np.degrees(self._native.angle))
+
+    @property
+    def data_len(self) -> int:
+        """Number of valid bytes in the descriptor"""
+        return min(int(self._native.data_len), len(self._native.data))
+
+    @property
+    def data(self) -> np.ndarray:
+        """Descriptor bytes as a NumPy array"""
+        length = self.data_len
+        return np.array(self._native.data[:length], dtype=np.uint8)
+
+    def bytes(self) -> bytes:
+        """Descriptor bytes as a Python bytes object"""
+        length = self.data_len
+        return bytes(self._native.data[:length])
 
 class ArbitPoseSample(Structure):
     """Trajectory pose sample"""
@@ -309,3 +381,37 @@ class ImuState:
         if not self._native.has_rotation_prior:
             return None
         return np.degrees(self._native.rotation_prior_radians)
+
+
+class Match:
+    """Python-friendly feature match wrapper"""
+    def __init__(self, native: ArbitMatch):
+        self._native = native
+    
+    @property
+    def query_idx(self) -> int:
+        """Index of the query descriptor"""
+        return int(self._native.query_idx)
+    
+    @property
+    def train_idx(self) -> int:
+        """Index of the train descriptor"""
+        return int(self._native.train_idx)
+    
+    @property
+    def distance(self) -> int:
+        """Hamming distance between descriptors"""
+        return int(self._native.distance)
+    
+    @property
+    def query_position(self) -> np.ndarray:
+        """Query descriptor position (x, y)"""
+        return np.array([self._native.query_x, self._native.query_y], dtype=np.float32)
+    
+    @property
+    def train_position(self) -> np.ndarray:
+        """Train descriptor position (x, y)"""
+        return np.array([self._native.train_x, self._native.train_y], dtype=np.float32)
+    
+    def __repr__(self) -> str:
+        return f"Match(query_idx={self.query_idx}, train_idx={self.train_idx}, distance={self.distance})"

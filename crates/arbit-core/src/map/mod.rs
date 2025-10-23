@@ -1,5 +1,3 @@
-mod descriptor;
-
 use crate::db::{KeyframeDescriptor, KeyframeEntry, KeyframeIndex};
 use crate::math::se3::TransformSE3;
 use crc32fast::Hasher;
@@ -8,8 +6,6 @@ use nalgebra::{Matrix4, Point3, Translation3, UnitQuaternion, Vector2, Vector3};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-
-pub use descriptor::{DescriptorInfo, DescriptorSample, build_descriptor};
 
 const GRID_SIZE: usize = 4;
 const CELL_COUNT: usize = GRID_SIZE * GRID_SIZE;
