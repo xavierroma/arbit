@@ -10,8 +10,8 @@ use rand::seq::index::sample;
 
 #[derive(Debug, Clone, Copy)]
 pub struct PnPObservation {
-    pub world_point: Point3<f64>,
-    pub normalized_image: Vector2<f64>,
+    pub world_xyz: Point3<f64>,
+    pub norm_xy: Vector2<f64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -31,9 +31,14 @@ impl Default for PnPRansacParams {
     }
 }
 
+/// Result of PnP estimation.
+///
+/// pose_cw: world→camera. This transform maps world coordinates into the camera frame,
+/// consistent with projection model x = K [R|t] X_world.
 #[derive(Debug, Clone)]
 pub struct PnPResult {
-    pub pose: TransformSE3,
+    /// pose_cw: world→camera. Maps world coordinates into camera coordinates.
+    pub pose_cw: TransformSE3,
     pub inliers: Vec<usize>,
     pub average_reprojection_error: f64,
 }
@@ -47,6 +52,9 @@ impl PnPRansac {
         Self { params }
     }
 
+    /// Estimate pose_cw (world→camera) from 2D-3D correspondences.
+    ///
+    /// Returns pose_cw: world→camera (maps world coords into camera coords).
     pub fn estimate(&self, observations: &[PnPObservation]) -> Option<PnPResult> {
         debug!(target: "arbit_core::pnp", "Starting PnP estimation with {} observations", observations.len());
 
@@ -88,7 +96,7 @@ impl PnPRansac {
             return None;
         }
 
-        let mut pose = best_pose?;
+        let mut pose_cw = best_pose?;
         let inlier_observations: Vec<_> = best_inliers.iter().map(|&i| observations[i]).collect();
 
         // Try linear refinement with a subset (avoid large matrices)
@@ -99,7 +107,7 @@ impl PnPRansac {
             .cloned()
             .collect();
         if let Some(refined) = solve_pnp_linear(&linear_subset) {
-            pose = refined;
+            pose_cw = refined;
         }
 
         // Use nonlinear refinement with a subset of inliers for stability
@@ -109,13 +117,13 @@ impl PnPRansac {
             .take(subset_size)
             .cloned()
             .collect();
-        if let Some(refined) = refine_pose(pose, &subset, 8) {
-            pose = refined;
+        if let Some(refined) = refine_pose(pose_cw, &subset, 8) {
+            pose_cw = refined;
         }
 
         let (avg_error, inliers) = evaluate_pose(
             observations,
-            &pose,
+            &pose_cw,
             self.params.threshold,
             self.params.min_inliers,
         );
@@ -131,7 +139,7 @@ impl PnPRansac {
         }
 
         Some(PnPResult {
-            pose,
+            pose_cw,
             inliers,
             average_reprojection_error: avg_error,
         })
@@ -140,14 +148,14 @@ impl PnPRansac {
 
 fn collect_inliers(
     observations: &[PnPObservation],
-    pose: &TransformSE3,
+    pose_cw: &TransformSE3,
     threshold: f64,
     min_required: usize,
 ) -> Vec<usize> {
     let mut errors: Vec<(f64, usize)> = observations
         .iter()
         .enumerate()
-        .map(|(idx, obs)| (reprojection_error(pose, obs), idx))
+        .map(|(idx, obs)| (reprojection_error(pose_cw, obs), idx))
         .collect();
 
     errors.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -171,14 +179,14 @@ fn collect_inliers(
 
 fn evaluate_pose(
     observations: &[PnPObservation],
-    pose: &TransformSE3,
+    pose_cw: &TransformSE3,
     threshold: f64,
     min_required: usize,
 ) -> (f64, Vec<usize>) {
     let mut scored: Vec<(f64, usize)> = observations
         .iter()
         .enumerate()
-        .map(|(idx, obs)| (reprojection_error(pose, obs), idx))
+        .map(|(idx, obs)| (reprojection_error(pose_cw, obs), idx))
         .collect();
 
     scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -217,13 +225,14 @@ fn evaluate_pose(
     (average, inliers)
 }
 
-fn reprojection_error(pose: &TransformSE3, obs: &PnPObservation) -> f64 {
-    let cam_point = pose.transform_point(&obs.world_point);
-    if cam_point.z <= 0.0 {
+/// Compute reprojection error for a given pose_cw mapping world→camera.
+fn reprojection_error(pose_cw: &TransformSE3, obs: &PnPObservation) -> f64 {
+    let cam_xyz = pose_cw.transform_point(&obs.world_xyz);
+    if cam_xyz.z <= 0.0 {
         return f64::MAX;
     }
-    let projected = Vector2::new(cam_point.x / cam_point.z, cam_point.y / cam_point.z);
-    (projected - obs.normalized_image).norm()
+    let projected = Vector2::new(cam_xyz.x / cam_xyz.z, cam_xyz.y / cam_xyz.z);
+    (projected - obs.norm_xy).norm()
 }
 
 fn solve_pnp_linear(observations: &[PnPObservation]) -> Option<TransformSE3> {
@@ -233,9 +242,9 @@ fn solve_pnp_linear(observations: &[PnPObservation]) -> Option<TransformSE3> {
 
     let mut a = nalgebra::DMatrix::<f64>::zeros(observations.len() * 2, 12);
     for (i, obs) in observations.iter().enumerate() {
-        let p = obs.world_point.coords;
-        let x = obs.normalized_image.x;
-        let y = obs.normalized_image.y;
+        let p = obs.world_xyz.coords;
+        let x = obs.norm_xy.x;
+        let y = obs.norm_xy.y;
         let row = i * 2;
 
         a[(row, 0)] = p.x;
@@ -303,13 +312,14 @@ fn solve_pnp_linear(observations: &[PnPObservation]) -> Option<TransformSE3> {
     ))
 }
 
+/// Nonlinear refinement of pose_cw (world→camera) using Gauss-Newton.
 fn refine_pose(
-    mut pose: TransformSE3,
+    mut pose_cw: TransformSE3,
     observations: &[PnPObservation],
     iterations: usize,
 ) -> Option<TransformSE3> {
     if observations.is_empty() {
-        return Some(pose);
+        return Some(pose_cw);
     }
 
     for _ in 0..iterations {
@@ -318,34 +328,26 @@ fn refine_pose(
         let mut valid_samples = 0usize;
 
         for obs in observations {
-            let cam_point = pose.transform_point(&obs.world_point);
-            if cam_point.z <= 0.0 {
+            let cam_xyz = pose_cw.transform_point(&obs.world_xyz);
+            if cam_xyz.z <= 0.0 {
                 continue;
             }
             valid_samples += 1;
 
-            let proj = Vector2::new(cam_point.x / cam_point.z, cam_point.y / cam_point.z);
-            let residual = proj - obs.normalized_image;
+            let proj = Vector2::new(cam_xyz.x / cam_xyz.z, cam_xyz.y / cam_xyz.z);
+            let residual = proj - obs.norm_xy;
 
             let jac_proj = Matrix2x3::new(
-                1.0 / cam_point.z,
+                1.0 / cam_xyz.z,
                 0.0,
-                -cam_point.x / (cam_point.z * cam_point.z),
+                -cam_xyz.x / (cam_xyz.z * cam_xyz.z),
                 0.0,
-                1.0 / cam_point.z,
-                -cam_point.y / (cam_point.z * cam_point.z),
+                1.0 / cam_xyz.z,
+                -cam_xyz.y / (cam_xyz.z * cam_xyz.z),
             );
 
             let skew = Matrix3::new(
-                0.0,
-                -cam_point.z,
-                cam_point.y,
-                cam_point.z,
-                0.0,
-                -cam_point.x,
-                -cam_point.y,
-                cam_point.x,
-                0.0,
+                0.0, -cam_xyz.z, cam_xyz.y, cam_xyz.z, 0.0, -cam_xyz.x, -cam_xyz.y, cam_xyz.x, 0.0,
             );
 
             let jac_trans = jac_proj;
@@ -378,10 +380,10 @@ fn refine_pose(
             Vector3::new(delta[0], delta[1], delta[2]),
         );
         let delta_pose = SE3::exp(&twist).to_isometry();
-        pose = delta_pose * pose;
+        pose_cw = delta_pose * pose_cw;
     }
 
-    Some(pose)
+    Some(pose_cw)
 }
 
 #[cfg(test)]
@@ -406,19 +408,19 @@ mod tests {
             let measurement = Vector2::new(cam.x / cam.z, cam.y / cam.z);
 
             observations.push(PnPObservation {
-                world_point: world,
-                normalized_image: measurement,
+                world_xyz: world,
+                norm_xy: measurement,
             });
         }
 
         for _ in 0..10 {
             observations.push(PnPObservation {
-                world_point: Point3::new(
+                world_xyz: Point3::new(
                     rng.gen_range(-1.0..1.0),
                     rng.gen_range(-1.0..1.0),
                     rng.gen_range(0.5..1.0),
                 ),
-                normalized_image: Vector2::new(rng.gen_range(-1.0..1.0), rng.gen_range(-1.0..1.0)),
+                norm_xy: Vector2::new(rng.gen_range(-1.0..1.0), rng.gen_range(-1.0..1.0)),
             });
         }
 

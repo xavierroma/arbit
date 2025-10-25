@@ -165,17 +165,10 @@ class ArbitEngine:
         lib.arbit_ingest_frame.argtypes = [c_void_p, POINTER(ArbitCameraFrame), c_void_p]
         lib.arbit_ingest_frame.restype = c_bool
         
-        # IMU ingestion
-        lib.arbit_ingest_imu.argtypes = [c_void_p, ArbitImuSample]
-        lib.arbit_ingest_imu.restype = c_bool
-        
         # State queries
         lib.arbit_get_frame_state.argtypes = [c_void_p, POINTER(ArbitFrameState)]
         lib.arbit_get_frame_state.restype = c_bool
-        
-        lib.arbit_get_imu_state.argtypes = [c_void_p, POINTER(ArbitImuState)]
-        lib.arbit_get_imu_state.restype = c_bool
-        
+                
         # Tracking queries
         lib.arbit_get_tracked_points.argtypes = [c_void_p, POINTER(ArbitTrackedPoint), c_ulong]
         lib.arbit_get_tracked_points.restype = c_ulong
@@ -242,20 +235,6 @@ class ArbitEngine:
         # Create output sample to receive processed frame info
         out_sample = ArbitCameraSample()
         result = self._lib.arbit_ingest_frame(self._handle, byref(native_frame), byref(out_sample))
-        return bool(result)
-    
-    def ingest_imu(self, sample: "ImuSample") -> bool:
-        """
-        Ingest an IMU sample (accelerometer + gyroscope)
-        
-        Args:
-            sample: IMU sample with accelerometer and gyroscope readings
-            
-        Returns:
-            True if sample was successfully processed
-        """
-        native_sample = sample.to_native()
-        result = self._lib.arbit_ingest_imu(self._handle, native_sample)
         return bool(result)
     
     def get_frame_state(self) -> FrameState:

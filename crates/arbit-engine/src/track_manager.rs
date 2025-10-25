@@ -4,7 +4,7 @@ use std::sync::{
     Arc,
 };
 
-use arbit_core::img::Pyramid;
+use arbit_core::img::{Pyramid, PyramidLevel};
 use arbit_core::math::CameraIntrinsics;
 use arbit_core::track::{FeatureSeed, TrackObservation, TrackOutcome, Tracker};
 use log::trace;
@@ -13,12 +13,17 @@ use nalgebra::Vector2;
 #[derive(Debug, Clone, Copy)]
 pub struct Observation {
     pub frame_id: u64,
-    pub pos: Vector2<f32>,
+    pub px_uv: Vector2<f32>,
+    pub level_scale: f32,
 }
 
 impl Observation {
-    pub fn new(frame_id: u64, pos: Vector2<f32>) -> Self {
-        Self { frame_id, pos }
+    pub fn new(frame_id: u64, px_uv: Vector2<f32>, level_scale: f32) -> Self {
+        Self {
+            frame_id,
+            px_uv,
+            level_scale,
+        }
     }
 }
 
@@ -71,10 +76,10 @@ pub struct AdvanceStats {
 }
 
 pub trait FlowTracker: Send + Sync + 'static {
-    fn track_with_prior(
+    fn track(
         &self,
-        prev: &Pyramid,
-        curr: &Pyramid,
+        prev: &PyramidLevel,
+        curr: &PyramidLevel,
         seed: Vector2<f32>,
         prior: Option<Vector2<f32>>,
         intrinsics: &CameraIntrinsics,
@@ -114,15 +119,24 @@ impl<T: FlowTracker> TrackManager<T> {
             .values_mut()
             .filter(|t| t.alive && t.last_seen == frame_prev)
         {
-            let p_prev = track
-                .obs
-                .last()
-                .map(|o| o.pos)
-                .unwrap_or_else(|| Vector2::zeros());
-
-            let forward = self
-                .tracker
-                .track_with_prior(prev_pyr, curr_pyr, p_prev, None, intr);
+            let Some(p_prev) = track.obs.last().cloned() else {
+                continue;
+            };
+            let (prev_pyr_level, curr_pyr_level) = (
+                &prev_pyr
+                    .levels()
+                    .iter()
+                    .find(|l| l.scale == p_prev.level_scale)
+                    .unwrap(),
+                &curr_pyr
+                    .levels()
+                    .iter()
+                    .find(|l| l.scale == p_prev.level_scale)
+                    .unwrap(),
+            );
+            let forward =
+                self.tracker
+                    .track(prev_pyr_level, curr_pyr_level, p_prev.px_uv, None, intr);
             if !matches!(forward.outcome, TrackOutcome::Converged) {
                 track.alive = false;
                 stats.killed += 1;
@@ -135,9 +149,13 @@ impl<T: FlowTracker> TrackManager<T> {
                 continue;
             }
 
-            let back =
-                self.tracker
-                    .track_with_prior(curr_pyr, prev_pyr, forward.refined, None, intr);
+            let back = self.tracker.track(
+                curr_pyr_level,
+                prev_pyr_level,
+                forward.refined_px_uv,
+                None,
+                intr,
+            );
             if !matches!(back.outcome, TrackOutcome::Converged) {
                 track.alive = false;
                 stats.killed += 1;
@@ -150,7 +168,7 @@ impl<T: FlowTracker> TrackManager<T> {
                 continue;
             }
 
-            let fb_err = (back.refined - p_prev).norm();
+            let fb_err = (back.refined_px_uv - p_prev.px_uv).norm();
             if fb_err > self.config.fb_th {
                 track.alive = false;
                 stats.killed += 1;
@@ -177,9 +195,11 @@ impl<T: FlowTracker> TrackManager<T> {
                 continue;
             }
 
-            track
-                .obs
-                .push(Observation::new(frame_curr, forward.refined));
+            track.obs.push(Observation::new(
+                frame_curr,
+                forward.refined_px_uv,
+                p_prev.level_scale,
+            ));
             track.last_seen = frame_curr;
             track.age = track.age.saturating_add(1);
 
@@ -213,7 +233,7 @@ impl<T: FlowTracker> TrackManager<T> {
             if obs.fb_err > self.config.fb_th || obs.residual > self.config.res_th {
                 continue;
             }
-            if self.near_existing(&obs.refined, frame_curr, self.config.r_promote) {
+            if self.near_existing(&obs.refined_px_uv, frame_curr, self.config.r_promote) {
                 continue;
             }
             accepted.push((idx, obs.score));
@@ -229,8 +249,8 @@ impl<T: FlowTracker> TrackManager<T> {
             let track = Track {
                 id,
                 obs: vec![
-                    Observation::new(frame_prev, obs.initial),
-                    Observation::new(frame_curr, obs.refined),
+                    Observation::new(frame_prev, obs.initial_px_uv, obs.level_scale),
+                    Observation::new(frame_curr, obs.refined_px_uv, obs.level_scale),
                 ],
                 alive: true,
                 last_seen: frame_curr,
@@ -258,12 +278,12 @@ impl<T: FlowTracker> TrackManager<T> {
                     .iter()
                     .rev()
                     .find(|obs| obs.frame_id == frame_id)
-                    .map(|obs| obs.pos)
+                    .map(|obs| obs.px_uv)
             })
             .collect()
     }
 
-    fn near_existing(&self, pos: &Vector2<f32>, frame_id: u64, radius: f32) -> bool {
+    fn near_existing(&self, px_uv: &Vector2<f32>, frame_id: u64, radius: f32) -> bool {
         if radius <= 0.0 {
             return false;
         }
@@ -277,7 +297,7 @@ impl<T: FlowTracker> TrackManager<T> {
                 .iter()
                 .rev()
                 .find(|obs| obs.frame_id == frame_id)
-                .map(|obs| (obs.pos - *pos).norm_squared() <= radius_sq)
+                .map(|obs| (obs.px_uv - *px_uv).norm_squared() <= radius_sq)
                 .unwrap_or(false)
         })
     }
@@ -296,7 +316,7 @@ pub fn non_max_suppression(mut points: Vec<FeatureSeed>, radius: f32) -> Vec<Fea
     let radius_sq = radius * radius;
     'outer: for candidate in points.into_iter() {
         for existing in result.iter() {
-            if (existing.position - candidate.position).norm_squared() <= radius_sq {
+            if (existing.px_uv - candidate.px_uv).norm_squared() <= radius_sq {
                 continue 'outer;
             }
         }
@@ -313,8 +333,8 @@ pub fn grid_cap(points: Vec<FeatureSeed>, cell: f32, cap: usize) -> Vec<FeatureS
     let mut result = Vec::with_capacity(points.len());
     for seed in points.into_iter() {
         let key = (
-            (seed.position.x / cell).floor() as i32,
-            (seed.position.y / cell).floor() as i32,
+            (seed.px_uv.x / cell).floor() as i32,
+            (seed.px_uv.y / cell).floor() as i32,
         );
         let count = grid.entry(key).or_insert(0);
         if *count < cap {
@@ -338,7 +358,7 @@ pub fn drop_near_live(
         .into_iter()
         .filter(|seed| {
             live.iter()
-                .all(|p| (p - seed.position).norm_squared() > radius_sq)
+                .all(|p| (p - seed.px_uv).norm_squared() > radius_sq)
         })
         .collect()
 }
@@ -364,14 +384,14 @@ pub fn apply_score_threshold(mut points: Vec<FeatureSeed>, percentile: f32) -> V
 }
 
 impl FlowTracker for Tracker {
-    fn track_with_prior(
+    fn track(
         &self,
-        prev: &Pyramid,
-        curr: &Pyramid,
+        prev: &PyramidLevel,
+        curr: &PyramidLevel,
         seed: Vector2<f32>,
         _prior: Option<Vector2<f32>>,
         intrinsics: &CameraIntrinsics,
     ) -> TrackObservation {
-        Tracker::track_with_prior(self, prev, curr, seed, None, Some(intrinsics))
+        Tracker::track(self, prev, curr, seed, None, Some(intrinsics))
     }
 }

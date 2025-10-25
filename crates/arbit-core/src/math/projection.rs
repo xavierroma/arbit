@@ -1,4 +1,4 @@
-use nalgebra::{Matrix2x3, Matrix3, Point3};
+use nalgebra::{Matrix2x3, Matrix3, Point3, Vector2};
 
 /// Basic radial/tangential distortion container.
 #[derive(Debug, Clone, PartialEq)]
@@ -21,20 +21,6 @@ impl Default for DistortionModel {
     fn default() -> Self {
         Self::None
     }
-}
-
-/// A 2D pixel coordinate.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ImagePoint {
-    pub u: f64,
-    pub v: f64,
-}
-
-/// Normalized image coordinates (projected onto the z = 1 plane).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct NormalizedImagePoint {
-    pub x: f64,
-    pub y: f64,
 }
 
 /// Standard pinhole camera intrinsics used throughout the pipeline.
@@ -75,44 +61,44 @@ impl CameraIntrinsics {
 
     /// Projects a 3D point in camera coordinates onto the image plane.
     /// Returns `None` if the point lies on or behind the camera plane (z <= 0).
-    pub fn project_point(&self, point_cam: &Point3<f64>) -> Option<ImagePoint> {
-        if point_cam.z <= 0.0 {
+    pub fn project_point(&self, cam_xyz: &Point3<f64>) -> Option<Vector2<f32>> {
+        if cam_xyz.z <= 0.0 {
             return None;
         }
 
-        let normalized = self.normalize(point_cam);
-        let distorted = self.apply_distortion(normalized);
+        let norm_xy = self.normalize(cam_xyz);
+        let distorted_xy = self.apply_distortion(norm_xy);
 
-        let u = self.fx * distorted.x + self.skew * distorted.y + self.cx;
-        let v = self.fy * distorted.y + self.cy;
-
-        Some(ImagePoint { u, v })
+        let u = self.fx * distorted_xy.x + self.skew * distorted_xy.y + self.cx;
+        let v = self.fy * distorted_xy.y + self.cy;
+        let px_uv = Vector2::new(u as f32, v as f32);
+        Some(px_uv)
     }
 
     /// Returns the normalized coordinates for a camera-space 3D point.
-    pub fn normalize(&self, point_cam: &Point3<f64>) -> NormalizedImagePoint {
-        NormalizedImagePoint {
-            x: point_cam.x / point_cam.z,
-            y: point_cam.y / point_cam.z,
-        }
+    pub fn normalize(&self, cam_xyz: &Point3<f64>) -> Vector2<f64> {
+        let norm_xy = Vector2::new(cam_xyz.x / cam_xyz.z, cam_xyz.y / cam_xyz.z);
+        norm_xy
     }
 
     /// Back-projects a pixel (with depth in meters) into camera coordinates.
-    pub fn back_project(&self, pixel: &ImagePoint, depth: f64) -> Point3<f64> {
-        let x_n = (pixel.u - self.cx - self.skew * (pixel.v - self.cy) / self.fy) / self.fx;
-        let y_n = (pixel.v - self.cy) / self.fy;
-        Point3::new(x_n * depth, y_n * depth, depth)
+    pub fn back_project(&self, px_uv: &Vector2<f32>, depth: f64) -> Point3<f64> {
+        let x_n =
+            (px_uv.x as f64 - self.cx - self.skew * (px_uv.y as f64 - self.cy) / self.fy) / self.fx;
+        let y_n = (px_uv.y as f64 - self.cy) / self.fy;
+        let cam_xyz = Point3::new(x_n * depth, y_n * depth, depth);
+        cam_xyz
     }
 
     /// Computes the Jacobian of the projection function with respect to camera-space coordinates.
     /// The Jacobian is evaluated assuming no additional distortion is applied (pass-through model).
-    pub fn projection_jacobian(&self, point_cam: &Point3<f64>) -> Option<Matrix2x3<f64>> {
-        if point_cam.z <= 0.0 {
+    pub fn projection_jacobian(&self, cam_xyz: &Point3<f64>) -> Option<Matrix2x3<f64>> {
+        if cam_xyz.z <= 0.0 {
             return None;
         }
-        let z = point_cam.z;
-        let x = point_cam.x;
-        let y = point_cam.y;
+        let z = cam_xyz.z;
+        let x = cam_xyz.x;
+        let y = cam_xyz.y;
 
         let mut jacobian = Matrix2x3::zeros();
         jacobian[(0, 0)] = self.fx / z;
@@ -126,11 +112,12 @@ impl CameraIntrinsics {
         Some(jacobian)
     }
 
-    fn apply_distortion(&self, normalized: NormalizedImagePoint) -> NormalizedImagePoint {
-        match &self.distortion {
-            DistortionModel::None => normalized,
-            _ => normalized, // Pass-through for milestone one; platform-provided coefficients stored only.
-        }
+    fn apply_distortion(&self, norm_xy: Vector2<f64>) -> Vector2<f64> {
+        let distorted_xy = match &self.distortion {
+            DistortionModel::None => norm_xy,
+            _ => norm_xy, // Pass-through for milestone one; platform-provided coefficients stored only.
+        };
+        distorted_xy
     }
 
     /// Returns true when the intrinsics carry a non-trivial distortion model.
@@ -214,8 +201,8 @@ mod tests {
             let proj_forward = intrinsics.project_point(&forward).unwrap();
             let proj_backward = intrinsics.project_point(&backward).unwrap();
 
-            numeric[(0, i)] = (proj_forward.u - proj_backward.u) / (2.0 * epsilon);
-            numeric[(1, i)] = (proj_forward.v - proj_backward.v) / (2.0 * epsilon);
+            numeric[(0, i)] = (proj_forward.x as f64 - proj_backward.x as f64) / (2.0 * epsilon);
+            numeric[(1, i)] = (proj_forward.y as f64 - proj_backward.y as f64) / (2.0 * epsilon);
         }
 
         assert_relative_eq!(jacobian, numeric, epsilon = 1e-6);

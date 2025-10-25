@@ -1,4 +1,3 @@
-pub mod adapters;
 pub mod db;
 pub mod img;
 pub mod imu;
@@ -9,7 +8,6 @@ pub mod math;
 pub mod relocalize;
 pub mod time;
 pub mod track;
-pub mod vo;
 
 #[cfg(test)]
 mod tests {

@@ -162,14 +162,14 @@ impl FeatureSeederTrait for ShiTomasiSeeder {
                                 continue;
                             }
 
-                            let pos = Vector2::new(x as f32 + 0.5, y as f32 + 0.5);
+                            let px_uv = Vector2::new(x as f32 + 0.5, y as f32 + 0.5);
 
                             // Insert by score (desc), keep size <= per_cell_cap
                             let mut i = 0;
                             while i < best.len() && best[i].0 > score {
                                 i += 1;
                             }
-                            best.insert(i, (score, pos));
+                            best.insert(i, (score, px_uv));
                             if best.len() > per_cell_cap {
                                 best.pop();
                             }
@@ -178,8 +178,9 @@ impl FeatureSeederTrait for ShiTomasiSeeder {
 
                     for (score, position) in best.into_iter() {
                         row_seeds.push(FeatureSeed {
+                            level_scale: level.scale,
                             level: level.octave,
-                            position,
+                            px_uv: position,
                             score,
                         });
                     }

@@ -35,7 +35,8 @@ impl Default for FeatureGridConfig {
 #[derive(Debug, Clone, Copy)]
 pub struct FeatureSeed {
     pub level: usize,
-    pub position: Vector2<f32>,
+    pub level_scale: f32,
+    pub px_uv: Vector2<f32>,
     pub score: f32,
 }
 

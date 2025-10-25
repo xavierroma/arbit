@@ -8,9 +8,9 @@ pub struct KeyframeDescriptor {
 }
 
 impl KeyframeDescriptor {
-    pub fn from_vec(data: Vec<f32>) -> Self {
+    pub fn from_slice(data: &[f32]) -> Self {
         Self {
-            data: DVector::from_row_slice(&data),
+            data: DVector::from_row_slice(data),
         }
     }
 
@@ -26,7 +26,7 @@ impl KeyframeDescriptor {
 #[derive(Debug, Clone)]
 pub struct KeyframeEntry {
     pub id: u64,
-    pub pose: TransformSE3,
+    pub pose_wc: TransformSE3,
     pub descriptor: KeyframeDescriptor,
 }
 
@@ -117,15 +117,15 @@ mod tests {
     fn index_returns_most_similar() {
         let mut index = KeyframeIndex::new();
         for id in 0..10u64 {
-            let descriptor = KeyframeDescriptor::from_vec(vec![id as f32, 1.0, 0.5]);
+            let descriptor = KeyframeDescriptor::from_slice(&[id as f32, 1.0, 0.5]);
             index.insert(KeyframeEntry {
                 id,
-                pose: pose(),
+                pose_wc: pose(),
                 descriptor,
             });
         }
 
-        let query = KeyframeDescriptor::from_vec(vec![9.0, 1.0, 0.5]);
+        let query = KeyframeDescriptor::from_slice(&[9.0, 1.0, 0.5]);
         let result = index.query(&query, 3);
         assert_eq!(result.first().unwrap().id, 9);
         assert_eq!(result.len(), 3);

@@ -114,146 +114,151 @@ impl FastSeeder {
 
 impl FeatureSeederTrait for FastSeeder {
     fn seed(&self, pyramid: &Pyramid) -> Vec<FeatureSeed> {
-        let level = &pyramid.levels()[0];
-        let width = level.image.width();
-        let height = level.image.height();
-        let grid_cfg = self.config.grid;
-        let detector_cfg = self.config.detector;
+        let mut seeds = Vec::new();
+        for level in pyramid.levels() {
+            let width = level.image.width();
+            let height = level.image.height();
+            let grid_cfg = self.config.grid;
+            let detector_cfg = self.config.detector;
 
-        let cell = grid_cfg.cell_size.max(4);
-        let per_cell_cap = grid_cfg.per_cell_cap.max(1);
-        let max_features = grid_cfg.max_features.max(per_cell_cap);
-        let response_threshold = grid_cfg.response_threshold.max(0.0);
-        let nms_radius = grid_cfg.nms_radius_px.max(0.0);
-        let lk_radius = grid_cfg.window_radius.max(1);
-        let circle_radius = detector_cfg.circle_radius.max(lk_radius);
+            let cell = grid_cfg.cell_size.max(4);
+            let per_cell_cap = grid_cfg.per_cell_cap.max(1);
+            let max_features = grid_cfg.max_features.max(per_cell_cap);
+            let response_threshold = grid_cfg.response_threshold.max(0.0);
+            let nms_radius = grid_cfg.nms_radius_px.max(0.0);
+            let lk_radius = grid_cfg.window_radius.max(1);
+            let circle_radius = detector_cfg.circle_radius.max(lk_radius);
 
-        if width <= circle_radius * 2 || height <= circle_radius * 2 {
-            return Vec::new();
-        }
+            if width <= circle_radius * 2 || height <= circle_radius * 2 {
+                return Vec::new();
+            }
 
-        let x_lo = circle_radius;
-        let x_hi = width - circle_radius;
-        let y_lo = circle_radius;
-        let y_hi = height - circle_radius;
+            let x_lo = circle_radius;
+            let x_hi = width - circle_radius;
+            let y_lo = circle_radius;
+            let y_hi = height - circle_radius;
 
-        let cells_x = ((x_hi - x_lo) + cell - 1) / cell;
-        let cells_y = ((y_hi - y_lo) + cell - 1) / cell;
+            let cells_x = ((x_hi - x_lo) + cell - 1) / cell;
+            let cells_y = ((y_hi - y_lo) + cell - 1) / cell;
 
-        let mut score_map = vec![0.0f32; width * height];
-        let mut candidates: Vec<Candidate> = Vec::new();
+            let mut score_map = vec![0.0f32; width * height];
+            let mut candidates: Vec<Candidate> = Vec::new();
 
-        for y in y_lo..y_hi {
-            for x in x_lo..x_hi {
-                if let Some(score) = fast_corner_score(
-                    level,
-                    x,
-                    y,
-                    &self.circle_offsets,
-                    detector_cfg.intensity_threshold,
-                    self.arc_length,
-                ) {
-                    let idx = y * width + x;
-                    score_map[idx] = score;
-                    candidates.push(Candidate { x, y, score });
+            for y in y_lo..y_hi {
+                for x in x_lo..x_hi {
+                    if let Some(score) = fast_corner_score(
+                        level,
+                        x,
+                        y,
+                        &self.circle_offsets,
+                        detector_cfg.intensity_threshold,
+                        self.arc_length,
+                    ) {
+                        let idx = y * width + x;
+                        score_map[idx] = score;
+                        candidates.push(Candidate { x, y, score });
+                    }
                 }
             }
-        }
 
-        trace!(
-            "FAST detected {} raw corners above threshold {:.1}",
-            candidates.len(),
-            detector_cfg.intensity_threshold
-        );
+            trace!(
+                "FAST detected {} raw corners above threshold {:.1}",
+                candidates.len(),
+                detector_cfg.intensity_threshold
+            );
 
-        if candidates.is_empty() {
+            if candidates.is_empty() {
+                debug!(
+                    "FAST seeding in {}x{} (oct {}) → 0 (raw)",
+                    width, height, level.octave
+                );
+                return Vec::new();
+            }
+
+            let candidates = if detector_cfg.nonmax_suppression {
+                apply_nonmax_suppression(&candidates, &score_map, width, height)
+            } else {
+                candidates
+            };
+
+            let mut buckets: Vec<Vec<FeatureSeed>> =
+                vec![Vec::with_capacity(per_cell_cap); cells_x * cells_y];
+
+            for candidate in candidates.into_iter() {
+                if candidate.score < response_threshold {
+                    continue;
+                }
+
+                if candidate.x < x_lo
+                    || candidate.x >= x_hi
+                    || candidate.y < y_lo
+                    || candidate.y >= y_hi
+                {
+                    continue;
+                }
+
+                let cx = (candidate.x - x_lo) / cell;
+                let cy = (candidate.y - y_lo) / cell;
+                if cx >= cells_x || cy >= cells_y {
+                    continue;
+                }
+
+                let bucket_idx = cy * cells_x + cx;
+                let bucket = &mut buckets[bucket_idx];
+                insert_sorted(
+                    bucket,
+                    FeatureSeed {
+                        level: level.octave,
+                        level_scale: level.scale,
+                        px_uv: Vector2::new(candidate.x as f32 + 0.5, candidate.y as f32 + 0.5),
+                        score: candidate.score,
+                    },
+                );
+
+                if bucket.len() > per_cell_cap {
+                    bucket.pop();
+                }
+            }
+
+            let mut seeds_level: Vec<FeatureSeed> = buckets.into_iter().flatten().collect();
+            if seeds_level.is_empty() {
+                debug!(
+                    "FAST seeding in {}x{} (oct {}) → 0 (grid filtered)",
+                    width, height, level.octave
+                );
+                continue;
+            }
+
+            seeds_level.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            let mut seeds_level = if nms_radius > 0.0 {
+                radius_nms(seeds_level, nms_radius, per_cell_cap)
+            } else {
+                seeds_level
+            };
+
+            if seeds_level.len() > max_features {
+                seeds_level.truncate(max_features);
+            }
+
             debug!(
-                "FAST seeding in {}x{} (oct {}) → 0 (raw)",
-                width, height, level.octave
-            );
-            return Vec::new();
-        }
-
-        let candidates = if detector_cfg.nonmax_suppression {
-            apply_nonmax_suppression(&candidates, &score_map, width, height)
-        } else {
-            candidates
-        };
-
-        let mut buckets: Vec<Vec<FeatureSeed>> =
-            vec![Vec::with_capacity(per_cell_cap); cells_x * cells_y];
-
-        for candidate in candidates.into_iter() {
-            if candidate.score < response_threshold {
-                continue;
-            }
-
-            if candidate.x < x_lo
-                || candidate.x >= x_hi
-                || candidate.y < y_lo
-                || candidate.y >= y_hi
-            {
-                continue;
-            }
-
-            let cx = (candidate.x - x_lo) / cell;
-            let cy = (candidate.y - y_lo) / cell;
-            if cx >= cells_x || cy >= cells_y {
-                continue;
-            }
-
-            let bucket_idx = cy * cells_x + cx;
-            let bucket = &mut buckets[bucket_idx];
-            insert_sorted(
-                bucket,
-                FeatureSeed {
-                    level: level.octave,
-                    position: Vector2::new(candidate.x as f32 + 0.5, candidate.y as f32 + 0.5),
-                    score: candidate.score,
-                },
+                "FAST seeding in {}x{} (oct {}, cell {}, K {}, NMS {:.1}px) → {} (max {})",
+                width,
+                height,
+                level.octave,
+                cell,
+                per_cell_cap,
+                nms_radius,
+                seeds.len(),
+                max_features
             );
 
-            if bucket.len() > per_cell_cap {
-                bucket.pop();
-            }
+            seeds.extend(seeds_level);
         }
-
-        let mut seeds: Vec<FeatureSeed> = buckets.into_iter().flatten().collect();
-        if seeds.is_empty() {
-            debug!(
-                "FAST seeding in {}x{} (oct {}) → 0 (grid filtered)",
-                width, height, level.octave
-            );
-            return seeds;
-        }
-
-        seeds.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        let mut seeds = if nms_radius > 0.0 {
-            radius_nms(seeds, nms_radius, max_features)
-        } else {
-            seeds
-        };
-
-        if seeds.len() > max_features {
-            seeds.truncate(max_features);
-        }
-
-        debug!(
-            "FAST seeding in {}x{} (oct {}, cell {}, K {}, NMS {:.1}px) → {} (max {})",
-            width,
-            height,
-            level.octave,
-            cell,
-            per_cell_cap,
-            nms_radius,
-            seeds.len(),
-            max_features
-        );
 
         seeds
     }
@@ -459,9 +464,9 @@ mod tests {
         assert!(seeds.len() <= 32);
         assert!(seeds.iter().all(|s| s.score >= 5.0));
         assert!(
-            seeds.iter().any(|s| {
-                (s.position.x - 16.5).abs() < 1.5 && (s.position.y - 16.5).abs() < 1.5
-            })
+            seeds
+                .iter()
+                .any(|s| { (s.px_uv.x - 16.5).abs() < 1.5 && (s.px_uv.y - 16.5).abs() < 1.5 })
         );
     }
 }

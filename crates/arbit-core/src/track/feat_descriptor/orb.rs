@@ -44,8 +44,8 @@ impl OrbDescriptor {
         level: &PyramidLevel,
         seed: &FeatureSeed,
     ) -> FeatDescriptor<[u8; ORB_DESCRIPTOR_BYTES]> {
-        let center_x = seed.position.x;
-        let center_y = seed.position.y;
+        let center_x = seed.px_uv.x;
+        let center_y = seed.px_uv.y;
         let angle = compute_orientation(level, center_x, center_y, self.patch_radius as f32);
         let descriptor = build_descriptor(
             level,
@@ -232,7 +232,7 @@ mod tests {
         let pyramid = build_pyramid(&blank, 1);
         let seed = FeatureSeed {
             level: 0,
-            position: Vector2::new(32.0, 32.0),
+            px_uv: Vector2::new(32.0, 32.0),
             score: 1.0,
         };
         let descriptors = orb.describe(&pyramid, &[seed]);

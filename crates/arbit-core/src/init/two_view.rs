@@ -1,13 +1,15 @@
 use log::{debug, trace};
-use nalgebra::{Matrix3, Matrix3x4, Point3, Rotation3, SVector, Vector2, Vector3};
+use nalgebra::{Matrix3, Matrix3x4, Point2, Point3, Rotation3, SVector, Vector2, Vector3};
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use rand::seq::index::sample;
 
 #[derive(Debug, Clone, Copy)]
 pub struct FeatureMatch {
-    pub normalized_a: Vector2<f64>,
-    pub normalized_b: Vector2<f64>,
+    //Normalized image coordinates in keyframe A
+    pub norm_xy_a: Vector2<f64>,
+    // Normalized image coordinates in keyframe B
+    pub norm_xy_b: Vector2<f64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -34,11 +36,14 @@ impl Default for TwoViewInitializationParams {
 #[derive(Debug, Clone)]
 pub struct TwoViewInitialization {
     pub essential: Matrix3<f64>,
-    pub rotation: Rotation3<f64>,
-    pub translation: Vector3<f64>,
+    // Rotation from cam1 -> cam2
+    pub rotation_c2c1: Rotation3<f64>,
+    // Translation from cam1 -> cam2 (in cam1 frame)
+    pub translation_c2c1: Vector3<f64>,
     pub inliers: Vec<usize>,
     pub average_sampson_error: f64,
-    pub landmarks: Vec<(usize, Point3<f64>)>,
+    // 3D points in camera 1 frame (norm_xy, cam_xyz)
+    pub landmarks_c1: Vec<(Point2<f64>, Point3<f64>)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -75,17 +80,17 @@ impl TwoViewInitializer {
 
         // Validate input data is not degenerate while accumulating parallax
         for (i, m) in matches.iter().enumerate() {
-            if !m.normalized_a.x.is_finite()
-                || !m.normalized_a.y.is_finite()
-                || !m.normalized_b.x.is_finite()
-                || !m.normalized_b.y.is_finite()
+            if !m.norm_xy_a.x.is_finite()
+                || !m.norm_xy_a.y.is_finite()
+                || !m.norm_xy_b.x.is_finite()
+                || !m.norm_xy_b.y.is_finite()
             {
                 debug!("Match {} has non-finite coordinates, rejecting", i);
                 return None;
             }
 
-            let dir_a = Vector3::new(m.normalized_a.x, m.normalized_a.y, 1.0);
-            let dir_b = Vector3::new(m.normalized_b.x, m.normalized_b.y, 1.0);
+            let dir_a = Vector3::new(m.norm_xy_a.x, m.norm_xy_a.y, 1.0);
+            let dir_b = Vector3::new(m.norm_xy_b.x, m.norm_xy_b.y, 1.0);
             let norm_a = dir_a.norm();
             let norm_b = dir_b.norm();
 
@@ -115,9 +120,9 @@ impl TwoViewInitializer {
 
         // Check for sufficient spread (not all points at origin)
         let spread_a =
-            matches.iter().map(|m| m.normalized_a.norm()).sum::<f64>() / matches.len() as f64;
+            matches.iter().map(|m| m.norm_xy_a.norm()).sum::<f64>() / matches.len() as f64;
         let spread_b =
-            matches.iter().map(|m| m.normalized_b.norm()).sum::<f64>() / matches.len() as f64;
+            matches.iter().map(|m| m.norm_xy_b.norm()).sum::<f64>() / matches.len() as f64;
 
         if spread_a < 1e-6 || spread_b < 1e-6 {
             debug!(
@@ -195,10 +200,13 @@ impl TwoViewInitializer {
             if let Some(point) =
                 triangulate(&identity_projection, &candidate_projection, &matches[idx])
             {
-                landmarks.push((idx, point));
+                landmarks.push((
+                    Point2::new(matches[idx].norm_xy_a.x, matches[idx].norm_xy_a.y),
+                    point,
+                ));
             }
         }
-        if landmarks.len() < 8 {
+        if landmarks.len() < 50 {
             debug!(
                 "Two-view initialization failed: insufficient triangulations ({}/{})",
                 landmarks.len(),
@@ -214,11 +222,11 @@ impl TwoViewInitializer {
 
         Some(TwoViewInitialization {
             essential: refined_e,
-            rotation: decomposition.rotation,
-            translation: decomposition.translation,
+            rotation_c2c1: decomposition.rotation,
+            translation_c2c1: decomposition.translation,
             inliers: best_inliers,
             average_sampson_error: avg_error,
-            landmarks,
+            landmarks_c1: landmarks,
         })
     }
 }
@@ -226,9 +234,9 @@ impl TwoViewInitializer {
 impl TwoViewInitialization {
     pub fn scaled(&self, scale: f64) -> Self {
         let mut scaled = self.clone();
-        scaled.translation *= scale;
-        scaled.landmarks = self
-            .landmarks
+        scaled.translation_c2c1 *= scale;
+        scaled.landmarks_c1 = self
+            .landmarks_c1
             .iter()
             .map(|(index, point)| {
                 (
@@ -239,12 +247,23 @@ impl TwoViewInitialization {
             .collect();
         scaled
     }
+    pub fn rotate_world_orientation(&self, rotation: &Rotation3<f64>) -> Self {
+        let mut rotated = self.clone();
+        rotated.rotation_c2c1 = rotation * self.rotation_c2c1;
+        rotated.translation_c2c1 = rotation * self.translation_c2c1;
+        rotated.landmarks_c1 = self
+            .landmarks_c1
+            .iter()
+            .map(|(index, point)| (*index, rotation * point))
+            .collect();
+        rotated
+    }
 }
 
 // Estimate the essential matrix from a set of feature matches; this is in epipolar geometry, the R and t are the rotation and translation of the second camera relative to the first, which once known can be used to triangulate 3D points.
 fn estimate_essential(matches: &[FeatureMatch]) -> Matrix3<f64> {
-    let (points_a, t_a) = normalize_points(matches.iter().map(|m| m.normalized_a).collect());
-    let (points_b, t_b) = normalize_points(matches.iter().map(|m| m.normalized_b).collect());
+    let (points_a, t_a) = normalize_points(matches.iter().map(|m| m.norm_xy_a).collect());
+    let (points_b, t_b) = normalize_points(matches.iter().map(|m| m.norm_xy_b).collect());
 
     let mut a = nalgebra::DMatrix::<f64>::zeros(matches.len(), 9);
     for (row, (pa, pb)) in points_a.iter().zip(points_b.iter()).enumerate() {
@@ -343,8 +362,8 @@ fn score_inliers(matches: &[FeatureMatch], essential: &Matrix3<f64>, threshold: 
 }
 
 fn sampson_error(e: &Matrix3<f64>, match_pair: &FeatureMatch) -> f64 {
-    let x1 = SVector::<f64, 3>::new(match_pair.normalized_a.x, match_pair.normalized_a.y, 1.0);
-    let x2 = SVector::<f64, 3>::new(match_pair.normalized_b.x, match_pair.normalized_b.y, 1.0);
+    let x1 = SVector::<f64, 3>::new(match_pair.norm_xy_a.x, match_pair.norm_xy_a.y, 1.0);
+    let x2 = SVector::<f64, 3>::new(match_pair.norm_xy_b.x, match_pair.norm_xy_b.y, 1.0);
     let ex1 = e * x1;
     let etx2 = e.transpose() * x2;
     let denom = ex1.x.powi(2) + ex1.y.powi(2) + etx2.x.powi(2) + etx2.y.powi(2);
@@ -408,7 +427,7 @@ fn choose_pose(essential: &Matrix3<f64>, matches: &[FeatureMatch]) -> Option<Dec
     best
 }
 
-fn compose_projection(rotation: &Rotation3<f64>, translation: &Vector3<f64>) -> Matrix3x4<f64> {
+pub fn compose_projection(rotation: &Rotation3<f64>, translation: &Vector3<f64>) -> Matrix3x4<f64> {
     let r = rotation.matrix();
     Matrix3x4::new(
         r[(0, 0)],
@@ -426,13 +445,17 @@ fn compose_projection(rotation: &Rotation3<f64>, translation: &Vector3<f64>) -> 
     )
 }
 
-fn triangulate(p1: &Matrix3x4<f64>, p2: &Matrix3x4<f64>, m: &FeatureMatch) -> Option<Point3<f64>> {
+pub fn triangulate(
+    p1: &Matrix3x4<f64>,
+    p2: &Matrix3x4<f64>,
+    m: &FeatureMatch,
+) -> Option<Point3<f64>> {
     let mut a = nalgebra::DMatrix::<f64>::zeros(4, 4);
 
-    fill_triangulation_row(&mut a, 0, p1, m.normalized_a.x, 0);
-    fill_triangulation_row(&mut a, 1, p1, m.normalized_a.y, 1);
-    fill_triangulation_row(&mut a, 2, p2, m.normalized_b.x, 0);
-    fill_triangulation_row(&mut a, 3, p2, m.normalized_b.y, 1);
+    fill_triangulation_row(&mut a, 0, p1, m.norm_xy_a.x, 0);
+    fill_triangulation_row(&mut a, 1, p1, m.norm_xy_a.y, 1);
+    fill_triangulation_row(&mut a, 2, p2, m.norm_xy_b.x, 0);
+    fill_triangulation_row(&mut a, 3, p2, m.norm_xy_b.y, 1);
 
     let svd = nalgebra::SVD::new(a, true, true);
     let v_t = svd.v_t?;
@@ -489,26 +512,30 @@ mod tests {
             .expect("two view initialization");
         assert!(result.inliers.len() >= 80);
         assert!(result.average_sampson_error < 1e-3);
-        assert!(!result.landmarks.is_empty());
-        let first_landmark_index = result.landmarks[0].0;
+        assert!(!result.landmarks_c1.is_empty());
+        let first_landmark_index = result.landmarks_c1[0].0;
 
-        assert_relative_eq!(result.rotation.matrix(), rotation.matrix(), epsilon = 1e-2);
         assert_relative_eq!(
-            result.translation.normalize(),
+            result.rotation_c2c1.matrix(),
+            rotation.matrix(),
+            epsilon = 1e-2
+        );
+        assert_relative_eq!(
+            result.translation_c2c1.normalize(),
             translation.normalize(),
             epsilon = 1e-2
         );
 
         let scaled = result.scaled(0.5);
-        assert_eq!(scaled.landmarks.len(), result.landmarks.len());
-        assert!(scaled.translation.norm() < result.translation.norm());
+        assert_eq!(scaled.landmarks_c1.len(), result.landmarks_c1.len());
+        assert!(scaled.translation_c2c1.norm() < result.translation_c2c1.norm());
         let scaled_first = scaled
-            .landmarks
+            .landmarks_c1
             .iter()
             .find(|(idx, _)| *idx == first_landmark_index)
             .expect("scaled landmark");
         let original_first = result
-            .landmarks
+            .landmarks_c1
             .iter()
             .find(|(idx, _)| *idx == first_landmark_index)
             .unwrap();
@@ -520,8 +547,8 @@ mod tests {
         let initializer = TwoViewInitializer::new(TwoViewInitializationParams::default());
         let matches = vec![
             FeatureMatch {
-                normalized_a: Vector2::new(0.0, 0.0),
-                normalized_b: Vector2::new(0.0, 0.0),
+                norm_xy_a: Vector2::new(0.0, 0.0),
+                norm_xy_b: Vector2::new(0.0, 0.0),
             };
             5
         ];
@@ -539,8 +566,8 @@ mod tests {
             let pb_cam = rotation * p.coords + translation;
             let pb = project_point(&Point3::from(pb_cam));
             matches.push(FeatureMatch {
-                normalized_a: pa,
-                normalized_b: pb,
+                norm_xy_a: pa,
+                norm_xy_b: pb,
             });
         }
         matches

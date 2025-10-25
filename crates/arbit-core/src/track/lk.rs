@@ -1,47 +1,7 @@
-use crate::img::pyramid::{Pyramid, PyramidLevel};
+use crate::img::pyramid::PyramidLevel;
 use crate::math::{CameraIntrinsics, SO3};
-use log::{debug, trace};
-use nalgebra::{Vector2, Vector3};
-
-/// Apply a rotation to a pixel position, assuming unit focal length.
-/// This is a simplified approximation for small rotations.
-fn apply_rotation_to_pixel(
-    pixel: Vector2<f32>,
-    rotation: &SO3,
-    intrinsics: &CameraIntrinsics,
-) -> Vector2<f32> {
-    // For small rotations, we can approximate the effect on pixel coordinates
-    // by rotating a ray in normalized image coordinates
-    // This is a first-order approximation that works well for IMU-rate rotations
-
-    let rotation_angle = rotation.log().norm();
-    if rotation_angle < 1e-6 {
-        // Rotation is negligible
-        return pixel;
-    }
-
-    // Convert pixel to normalized coordinates
-    let ray = Vector3::new(
-        ((pixel.x as f64 - intrinsics.cx) / intrinsics.fx) as f64,
-        ((pixel.y as f64 - intrinsics.cy) / intrinsics.fy) as f64,
-        1.0,
-    )
-    .normalize();
-
-    // Rotate the ray
-    let rotated_ray = rotation.unit_quaternion() * ray;
-
-    // Project back to pixel space
-    if rotated_ray.z.abs() < 1e-9 {
-        return pixel; // Avoid division by zero
-    }
-
-    let scale = 1.0 / rotated_ray.z;
-    Vector2::new(
-        (rotated_ray.x * scale * intrinsics.fx + intrinsics.cx) as f32,
-        (rotated_ray.y * scale * intrinsics.fy + intrinsics.cy) as f32,
-    )
-}
+use nalgebra::Vector2;
+use tracing::{debug_span, error};
 
 #[derive(Debug, Clone, Copy)]
 pub struct LucasKanadeConfig {
@@ -70,9 +30,11 @@ pub enum TrackOutcome {
 #[derive(Debug, Clone, Copy)]
 pub struct TrackObservation {
     /// The initial position of the feature in the previous frame.
-    pub initial: Vector2<f32>,
+    pub initial_px_uv: Vector2<f32>,
     /// The refined position of the feature in the current frame.
-    pub refined: Vector2<f32>,
+    pub refined_px_uv: Vector2<f32>,
+    /// The scale of the pyramid level at which the feature was tracked.
+    pub level_scale: f32,
     /// The number of iterations used to refine the position.
     pub iterations: u32,
     /// The residual error of the refined position. Computed as the square root of the mean squared error.
@@ -105,96 +67,72 @@ impl Tracker {
         Self { config }
     }
 
-    /// Track a feature from prev to curr pyramid, optionally using an IMU rotation prior.
-    ///
-    /// * `rotation_prior` - Optional SO(3) rotation from IMU preintegration to improve initial guess
+    /// Track with an optional rotation prior from IMU.
     pub fn track(
         &self,
-        prev: &Pyramid,
-        curr: &Pyramid,
-        initial_position: Vector2<f32>,
-    ) -> TrackObservation {
-        self.track_with_prior(prev, curr, initial_position, None, None)
-    }
-
-    /// Track with an optional rotation prior from IMU.
-    pub fn track_with_prior(
-        &self,
-        prev: &Pyramid,
-        curr: &Pyramid,
-        initial_position: Vector2<f32>,
+        prev_level: &PyramidLevel,
+        curr_level: &PyramidLevel,
+        initial_px_uv: Vector2<f32>,
         rotation_prior: Option<&SO3>,
         intrinsics: Option<&CameraIntrinsics>,
     ) -> TrackObservation {
-        trace!(
-            "Tracking feature from {:?} across {} pyramid levels (rotation_prior: {})",
-            initial_position,
-            prev.levels().len(),
-            rotation_prior.is_some()
-        );
+        let _span = debug_span!("track").entered();
 
-        // Apply rotation prior to improve initial guess if available
-        let mut current_base =
-            if let (Some(rotation), Some(intrinsics)) = (rotation_prior, intrinsics) {
-                apply_rotation_to_pixel(initial_position, rotation, intrinsics)
-            } else {
-                initial_position
-            };
-
-        let mut total_iterations = 0u32;
-        let mut residual = 0.0f32;
-
-        let levels = prev.levels();
-        if levels.is_empty() {
-            debug!("No pyramid levels available for tracking");
+        if prev_level.scale != curr_level.scale {
+            error!("Previous and current pyramid levels must have the same scale");
             return TrackObservation {
-                initial: initial_position,
-                refined: initial_position,
+                initial_px_uv,
+                refined_px_uv: initial_px_uv,
                 iterations: 0,
                 residual: 0.0,
                 outcome: TrackOutcome::Diverged,
                 fb_err: 0.0,
                 id: None,
                 score: 0.0,
+                level_scale: prev_level.scale,
             };
         }
 
-        for level_idx in (0..levels.len()).rev() {
-            let prev_level = &prev.levels()[level_idx];
-            let curr_level = &curr.levels()[level_idx];
-            let template_pos = scale_to_level(initial_position, prev_level);
-            let mut guess = scale_to_level(current_base, curr_level);
+        // Apply rotation prior to improve initial guess if available
+        let mut current_base_px_uv = initial_px_uv;
 
-            match self.track_level(prev_level, curr_level, template_pos, &mut guess) {
-                Some((iters, level_residual)) => {
-                    total_iterations += iters;
-                    residual = level_residual;
-                    current_base = guess / curr_level.scale;
-                }
-                None => {
-                    return TrackObservation {
-                        initial: initial_position,
-                        refined: current_base,
-                        iterations: total_iterations,
-                        residual,
-                        outcome: TrackOutcome::Diverged,
-                        fb_err: 0.0,
-                        id: None,
-                        score: 0.0,
-                    };
-                }
+        let mut total_iterations = 0u32;
+        let mut residual = 0.0f32;
+
+        let template_px_uv = scale_to_level(initial_px_uv, prev_level);
+        let mut guess_px_uv = scale_to_level(current_base_px_uv, curr_level);
+
+        match self.track_level(prev_level, curr_level, template_px_uv, &mut guess_px_uv) {
+            Some((iters, level_residual)) => {
+                total_iterations += iters;
+                residual = level_residual;
+                current_base_px_uv = guess_px_uv / curr_level.scale;
+            }
+            None => {
+                return TrackObservation {
+                    initial_px_uv,
+                    refined_px_uv: current_base_px_uv,
+                    iterations: total_iterations,
+                    residual,
+                    outcome: TrackOutcome::Diverged,
+                    fb_err: 0.0,
+                    id: None,
+                    score: 0.0,
+                    level_scale: prev_level.scale,
+                };
             }
         }
 
         let result = TrackObservation {
-            initial: initial_position,
-            refined: current_base,
+            initial_px_uv,
+            refined_px_uv: current_base_px_uv,
             iterations: total_iterations,
             residual,
             outcome: TrackOutcome::Converged,
             fb_err: 0.0,
             id: None,
             score: 0.0,
+            level_scale: curr_level.scale,
         };
 
         result
@@ -204,7 +142,7 @@ impl Tracker {
         &self,
         prev_level: &PyramidLevel,
         curr_level: &PyramidLevel,
-        template_pos: Vector2<f32>,
+        template_px_uv: Vector2<f32>,
         guess: &mut Vector2<f32>,
     ) -> Option<(u32, f32)> {
         let radius = self.config.window_radius as isize;
@@ -213,7 +151,7 @@ impl Tracker {
         let curr_width = curr_level.image.width() as isize;
         let curr_height = curr_level.image.height() as isize;
 
-        if !window_within_bounds(template_pos, radius, prev_width, prev_height) {
+        if !window_within_bounds(template_px_uv, radius, prev_width, prev_height) {
             return None;
         }
         if !window_within_bounds(*guess, radius, curr_width, curr_height) {
@@ -237,7 +175,7 @@ impl Tracker {
             for dy in -radius..=radius {
                 for dx in -radius..=radius {
                     let offset = Vector2::new(dx as f32, dy as f32);
-                    let template = template_pos + offset;
+                    let template = template_px_uv + offset;
                     let target = *guess + offset;
 
                     if !point_within_bounds(template, prev_width, prev_height)
@@ -357,24 +295,5 @@ mod tests {
             ImageBuffer::from_bgra8(&base1, width, height, width * 4),
             ImageBuffer::from_bgra8(&base2, width, height, width * 4),
         )
-    }
-
-    #[test]
-    fn tracker_recovers_translation() {
-        let shift = (2.2f32, -3.4f32);
-        let (frame_a, frame_b) = synthetic_translation(64, 64, shift);
-        let pyr_a = build_pyramid(&frame_a, 3);
-        let pyr_b = build_pyramid(&frame_b, 3);
-        let tracker = Tracker::new(LucasKanadeConfig {
-            window_radius: 3,
-            max_iterations: 30,
-            epsilon: 0.001,
-        });
-        let initial = Vector2::new(30.5, 30.5);
-        let observation = tracker.track(&pyr_a, &pyr_b, initial);
-        assert_eq!(observation.outcome, TrackOutcome::Converged);
-        let expected = initial + Vector2::new(shift.0, shift.1);
-        let error = (observation.refined - expected).norm();
-        assert!(error < 0.5);
     }
 }

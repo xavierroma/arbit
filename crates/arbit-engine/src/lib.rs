@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
 
+use arbit_core::db::KeyframeDescriptor;
 use arbit_core::img::{build_pyramid, ImageBuffer, Pyramid, PyramidLevel};
 use arbit_core::imu::{
     AccelBiasEstimator, GravityEstimate, GravityEstimator, GyroBiasEstimator, ImuPreintegrator,
@@ -17,6 +18,7 @@ use arbit_core::imu::{
 use arbit_core::init::two_view::{
     FeatureMatch, TwoViewInitialization, TwoViewInitializationParams, TwoViewInitializer,
 };
+use arbit_core::init::{compose_projection, triangulate};
 use arbit_core::map::{self, Anchor, KeyframeData, MapIoError, WorldMap};
 use arbit_core::math::se3::TransformSE3;
 use arbit_core::math::CameraIntrinsics;
@@ -27,10 +29,9 @@ use arbit_core::track::{
     FeatureSeederTrait, HammingFeatMatcher, LucasKanadeConfig, OrbDescriptor, TrackObservation,
     TrackOutcome, Tracker,
 };
-use arbit_core::vo::{FrameObservation, VoLoop, VoLoopConfig, VoStatus};
 use arbit_providers::CameraSample;
 use log::{debug, info, warn};
-use nalgebra::{Matrix3x4, Point3, Translation3, UnitQuaternion, Vector2, Vector3};
+use nalgebra::{Matrix3x4, Point3, Rotation3, Translation3, UnitQuaternion, Vector2, Vector3};
 use tracing::debug_span;
 
 use crate::track_manager::{drop_near_live, TrackConfig, TrackManager};
@@ -97,12 +98,9 @@ enum TrackingState {
 pub struct ProjectedAnchor {
     /// The underlying anchor data
     pub anchor: Anchor,
-    /// Normalized image coordinates (u, v) in range [0, 1]
-    pub normalized_u: f64,
-    pub normalized_v: f64,
+    pub norm_xy: Vector2<f64>,
     /// Pixel coordinates in the current frame
-    pub pixel_x: f32,
-    pub pixel_y: f32,
+    pub px_uv: Vector2<f32>,
     /// Depth from camera (distance along optical axis)
     pub depth: f64,
 }
@@ -111,19 +109,17 @@ pub struct ProjectedAnchor {
 #[derive(Debug, Clone)]
 pub struct ProjectedLandmark {
     pub landmark_id: u64,
-    pub world_position: Point3<f64>,
-    pub normalized_u: f64,
-    pub normalized_v: f64,
-    pub pixel_x: f32,
-    pub pixel_y: f32,
+    pub world_xyz: Point3<f64>,
+    pub norm_xy: Vector2<f64>,
+    pub px_uv: Vector2<f32>,
     pub depth: f64,
 }
 
 /// Debug snapshot of the map state for visualization.
 #[derive(Debug, Clone)]
 pub struct MapDebugSnapshot {
-    pub camera_position: Vector3<f64>,
-    pub camera_rotation: [f64; 9], // 3x3 rotation matrix (row-major)
+    pub cam_xyz: Vector3<f64>,
+    pub cam_rotation: [f64; 9], // 3x3 rotation matrix (row-major)
     pub landmark_count: usize,
     pub keyframe_count: usize,
     pub anchor_count: usize,
@@ -162,26 +158,13 @@ pub struct ProcessingEngine<S: FeatureSeederTrait, D: FeatDescriptorExtractor> {
 
     frame_window: VecDeque<FrameData>,
     keyframe_window: VecDeque<KeyFrameData<D::Storage>>,
-    // last_intrinsics: Option<CameraIntrinsics>,
-    // prev_pyramid: Option<Pyramid>,
-    // pyramid_cache: Vec<PyramidLevelCache>,
-    // last_tracks: Vec<TrackObservation>,
     last_two_view: Option<TwoViewInitialization>,
     trajectory: Vec<Vector3<f64>>,
-    current_pose: TransformSE3,
+    /// pose_wc: camera→world. PnP returns pose_cw (world→camera); we store its inverse here.
+    pose_wc: TransformSE3,
     last_gravity: Option<GravityEstimate>,
     map: WorldMap,
-    pnp: PnPRansac,
     frame_index: u64,
-    last_relocalization: Option<PnPResult>,
-    last_keyframe_id: Option<u64>,
-    // Track indexed landmarks for PnP
-    tracked_landmark_ids: HashMap<u64, u64>,
-    // IMU preintegration components
-    last_motion_stats: Option<MotionStats>,
-    last_preintegrated: Option<PreintegratedImu>,
-    preintegration_count: usize,
-
     feat_detector: S,
     feat_descriptor: D,
     feat_matcher: HammingFeatMatcher,
@@ -189,11 +172,7 @@ pub struct ProcessingEngine<S: FeatureSeederTrait, D: FeatDescriptorExtractor> {
     track_manager: Mutex<TrackManager<Tracker>>,
     two_view_initializer: TwoViewInitializer,
     gravity_estimator: GravityEstimator,
-    vo_loop: VoLoop,
-    preintegrator: Option<ImuPreintegrator>,
-    motion_detector: Option<MotionDetector>,
-    gyro_bias_estimator: Option<GyroBiasEstimator>,
-    accel_bias_estimator: Option<AccelBiasEstimator>,
+    pnp: PnPRansac,
 }
 
 impl ProcessingEngine<FastSeeder, OrbDescriptor> {
@@ -230,23 +209,12 @@ impl ProcessingEngine<FastSeeder, OrbDescriptor> {
             last_two_view: None,
             two_view_initializer: TwoViewInitializer::new(TwoViewInitializationParams::default()),
             trajectory: vec![Vector3::new(0.0, 0.0, 0.0)],
-            current_pose: TransformSE3::identity(),
+            pose_wc: TransformSE3::identity(),
             last_gravity: None,
             gravity_estimator: GravityEstimator::new(0.75),
             map: WorldMap::new(),
-            pnp,
-            vo_loop: VoLoop::new(VoLoopConfig::default()),
             frame_index: 0,
-            last_relocalization: None,
-            last_keyframe_id: None,
-            tracked_landmark_ids: HashMap::new(),
-            preintegrator: None,
-            motion_detector: None,
-            gyro_bias_estimator: None,
-            accel_bias_estimator: None,
-            last_motion_stats: None,
-            last_preintegrated: None,
-            preintegration_count: 0,
+            pnp,
         };
 
         engine
@@ -310,10 +278,14 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
             preintegrated_imu: None,
         };
 
-        let Some(prev_frame) = self.current_frame() else {
+        let prev_frame_opt = self.current_frame().cloned();
+        self.frame_window.push_front(frame_data.clone());
+        if self.frame_window.len() > self.config.frame_window_size {
+            self.frame_window.pop_back();
+        }
+        self.frame_index += 1;
+        let Some(prev_frame) = prev_frame_opt else {
             warn!("No previous frame found");
-            self.frame_window.push_front(frame_data);
-            self.frame_index += 1;
             return;
         };
 
@@ -327,42 +299,59 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
         );
         frame_data.tracks = tracks;
 
-        let is_key_frame = self.frame_index % 60 == 0;
-        if is_key_frame {
-            let _span = debug_span!("feat_descriptor").entered();
-            let curr_frame = frame_data.clone();
-            let seeds = self.feat_detector.seed(&curr_frame.pyramid);
-            let descriptors = self.feat_descriptor.describe(&frame_data.pyramid, &seeds);
-            let keyframe_data = KeyFrameData {
-                frame_data: curr_frame,
-                descriptors,
-            };
-            self.keyframe_window.push_front(keyframe_data);
-        }
-
-        self.frame_window.push_front(frame_data);
-        if self.frame_window.len() > self.config.frame_window_size {
-            self.frame_window.pop_back();
-        }
-        self.frame_index += 1;
-
         // Step 6: Estimate pose (initialization or tracking)
         match self.tracking_state {
             TrackingState::Uninitialized => {
                 self.tracking_state = TrackingState::TrackingPreInit;
             }
             TrackingState::TrackingPreInit => {
+                let is_key_frame = self.frame_index % 60 == 0;
                 if !is_key_frame {
                     return;
                 }
+                let _span = debug_span!("feat_descriptor").entered();
+                let curr_frame = frame_data.clone();
+                let seeds = self.feat_detector.seed(&curr_frame.pyramid);
+                let descriptors = self.feat_descriptor.describe(&curr_frame.pyramid, &seeds);
+                let keyframe_data = KeyFrameData {
+                    frame_data: curr_frame,
+                    descriptors,
+                };
                 if let Some(two_view) = self.run_two_view_initialization() {
-                    self.last_two_view = Some(two_view);
+                    self.last_two_view = Some(two_view.clone());
                     self.tracking_state = TrackingState::Tracking;
-                    //TODO: Insert keyframe into map
+                    //Dummy descriptor for now
+                    let frame_descriptor = KeyframeDescriptor::from_slice(&[0.0; 5]);
+                    self.map
+                        .insert_keyframe(self.pose_wc, frame_descriptor, two_view.landmarks_c1);
+                } else {
+                    self.keyframe_window.push_front(keyframe_data);
                 }
             }
             TrackingState::Tracking => {
-                // TODO: Implement PnP tracking
+                // let pnp_observations = frame_data
+                //     .tracks
+                //     .iter()
+                //     .map(|t| PnPObservation {
+                //         world_point: project_normalized_to_world(
+                //             pos_px_to_normalized(t.initial, t.level_scale, &frame_data.intrinsics),
+                //             &frame_data.pose,
+                //         ),
+                //         normalized_image: pos_px_to_normalized(
+                //             t.refined,
+                //             t.level_scale,
+                //             &frame_data.intrinsics,
+                //         ),
+                //     })
+                //     .collect::<Vec<_>>();
+                // let pnp_result = self.pnp.estimate(&pnp_observations);
+                // if let Some(pnp_result) = pnp_result {
+                //     // pose_cw from PnP
+                //     let pose_cw = pnp_result.pose_cw;
+                //     let pose_wc = pose_cw.inverse();
+                //     self.pose_wc = pose_wc;
+                //     self.trajectory.push(self.pose_wc.translation.vector);
+                // }
             }
         }
     }
@@ -430,11 +419,6 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
         self.gravity_estimator.sample_count() as u32
     }
 
-    /// Latest relocalization result, if any.
-    pub fn last_relocalization(&self) -> Option<&PnPResult> {
-        self.last_relocalization.as_ref()
-    }
-
     /// Aggregate map statistics (keyframes, landmarks, anchors).
     pub fn map_stats(&self) -> (u64, u64, u64) {
         (
@@ -446,7 +430,7 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
 
     /// Current estimated camera pose.
     pub fn current_pose(&self) -> &TransformSE3 {
-        &self.current_pose
+        &self.pose_wc
     }
 
     // ========================================================================
@@ -530,23 +514,23 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
         // Step 5: track candidates forward and evaluate quality
         let mut candidates: Vec<TrackObservation> = Vec::with_capacity(seeds.len());
         for seed in seeds.iter() {
-            let mut observation = self.tracker.track_with_prior(
-                prev_pyramid,
-                curr_pyramid,
-                seed.position,
+            let mut observation = self.tracker.track(
+                &prev_pyramid.levels()[seed.level],
+                &curr_pyramid.levels()[seed.level],
+                seed.px_uv,
                 None,
-                Some(intrinsics),
+                Some(&intrinsics),
             );
 
             if matches!(observation.outcome, TrackOutcome::Converged) {
-                let backward = self.tracker.track_with_prior(
-                    curr_pyramid,
-                    prev_pyramid,
-                    observation.refined,
+                let backward = self.tracker.track(
+                    &curr_pyramid.levels()[seed.level],
+                    &prev_pyramid.levels()[seed.level],
+                    observation.refined_px_uv,
                     None,
                     Some(intrinsics),
                 );
-                observation.fb_err = (backward.refined - seed.position).norm();
+                observation.fb_err = (backward.refined_px_uv - seed.px_uv).norm();
             } else {
                 observation.fb_err = f32::MAX;
             }
@@ -562,12 +546,6 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
         advanced
     }
 
-    // ========================================================================
-    // POSE ESTIMATION: Two-View Initialization & PnP Tracking
-    // ========================================================================
-
-    /// Run two-view initialization to bootstrap the map.
-    /// Creates the initial map with gravity-aligned coordinate frame.
     fn run_two_view_initialization(&mut self) -> Option<TwoViewInitialization> {
         let _span = debug_span!("two_view_initialization").entered();
 
@@ -591,18 +569,21 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
             let matches_res = self
                 .feat_matcher
                 .match_feats(&older_keyframe.descriptors, &curr_frame.descriptors);
+            let curr_intrinsics = &curr_frame.frame_data.intrinsics;
 
             let matches: Vec<FeatureMatch> = matches_res
                 .iter()
-                .map(|m| FeatureMatch {
-                    normalized_a: older_keyframe.descriptors[m.query_idx]
-                        .seed
-                        .position
-                        .cast::<f64>(),
-                    normalized_b: curr_frame.descriptors[m.train_idx]
-                        .seed
-                        .position
-                        .cast::<f64>(),
+                .map(|m| {
+                    let qa = &older_keyframe.descriptors[m.query_idx].seed;
+                    let tb = &curr_frame.descriptors[m.train_idx].seed;
+
+                    let norm_xy_a = px_uv_to_norm_xy(qa.px_uv, qa.level_scale, prev_intrinsics);
+                    let norm_xy_b = px_uv_to_norm_xy(tb.px_uv, tb.level_scale, curr_intrinsics);
+
+                    FeatureMatch {
+                        norm_xy_a,
+                        norm_xy_b,
+                    }
                 })
                 .collect();
 
@@ -620,7 +601,7 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
                 let result = self.two_view_initializer.estimate(&matches);
                 if let Some(ref tv) = result {
                     info!(target: "arbit_engine", "✅ Two-view SUCCESS: {} inliers, {} landmarks", 
-                          tv.inliers.len(), tv.landmarks.len());
+                          tv.inliers.len(), tv.landmarks_c1.len());
                 }
                 result
             };
@@ -651,24 +632,41 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
 
         // Scale and apply world alignment
         let scaled_two_view = two_view.scaled(self.config.baseline_scale);
-        let landmark_count = scaled_two_view.landmarks.len();
+        let rotated_two_view =
+            scaled_two_view.rotate_world_orientation(&Rotation3::from(world_alignment.rotation));
 
-        let initial_pose = world_alignment.inverse();
-        self.current_pose = initial_pose.clone();
+        // Camera 2 → Camera 1 (where World = Camera 1)
+        let rotation_c2c1 = rotated_two_view.rotation_c2c1.matrix();
+        let translation_c2c1 = rotated_two_view.translation_c2c1;
+        let rotation_c1c2 = rotation_c2c1.transpose(); // Camera 2 → Camera 1 = Camera 2 → World
+        let translation_c1c2 = -(rotation_c1c2.transpose() * translation_c2c1); // Camera 2 → World translation
 
-        info!(target: "arbit_engine", "   Initial pose set to T_cam_world (inverted gravity alignment)");
+        let pose_c1c2 = TransformSE3::from_parts(
+            Translation3::from(translation_c1c2),
+            UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix(&rotation_c1c2)),
+        );
 
-        // Update pose for second frame
-        self.current_pose = update_pose(&initial_pose, &scaled_two_view);
-        self.trajectory.push(self.current_pose.translation.vector);
+        self.pose_wc = pose_c1c2.clone();
+        self.trajectory.push(self.pose_wc.translation.vector);
+
+        let frame_descriptor_a = KeyframeDescriptor::from_slice(&[0.0; 5]); // TODO: real descriptor
+        let landmakrs_len = rotated_two_view.landmarks_c1.len();
+        self.map.insert_keyframe(
+            TransformSE3::identity(), // Camera 1 -> World (Identity since 1 = World)
+            frame_descriptor_a,
+            rotated_two_view.clone().landmarks_c1, // Landmarks in Camera 1 frame = World frame
+        );
 
         info!(
             target: "arbit_engine",
-            "✅ Map initialized with {} landmarks, gravity-aligned world frame. STATE: TrackingPreInit → Tracking",
-            landmark_count
+            "✅ Map initialized: Camera 1 (world origin) with {} landmarks, Camera 2 at [{:.3}, {:.3}, {:.3}]",
+            landmakrs_len,
+            self.pose_wc.translation.x,
+            self.pose_wc.translation.y,
+            self.pose_wc.translation.z
         );
 
-        Some(two_view)
+        Some(rotated_two_view)
     }
 
     fn encode_luma(&self, level: &PyramidLevel) -> Vec<u8> {
@@ -682,8 +680,8 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
 }
 
 fn update_pose(current: &TransformSE3, two_view: &TwoViewInitialization) -> TransformSE3 {
-    let rotation = UnitQuaternion::from_rotation_matrix(&two_view.rotation);
-    let translation = Translation3::from(two_view.translation);
+    let rotation = UnitQuaternion::from_rotation_matrix(&two_view.rotation_c2c1);
+    let translation = Translation3::from(two_view.translation_c2c1);
     let delta = TransformSE3::from_parts(translation, rotation);
     current * delta
 }
@@ -731,4 +729,17 @@ impl Default for ProcessingEngine<FastSeeder, OrbDescriptor> {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn px_uv_to_norm_xy(
+    px_uv: Vector2<f32>,
+    level_scale: f32,
+    intrinsics: &CameraIntrinsics,
+) -> nalgebra::Vector2<f64> {
+    let u = px_uv.x as f64 / level_scale as f64;
+    let v = px_uv.y as f64 / level_scale as f64;
+
+    let x = (u - intrinsics.cx) / (intrinsics.fx);
+    let y = (v - intrinsics.cy) / (intrinsics.fy);
+    nalgebra::Vector2::new(x, y)
 }

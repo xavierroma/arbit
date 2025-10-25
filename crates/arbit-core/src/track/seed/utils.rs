@@ -5,8 +5,8 @@ pub fn radius_nms(mut seeds: Vec<FeatureSeed>, radius: f32, max_keep: usize) -> 
     let mut kept: Vec<FeatureSeed> = Vec::with_capacity(seeds.len());
     'outer: for s in seeds.drain(..) {
         for k in &kept {
-            let dx = s.position.x - k.position.x;
-            let dy = s.position.y - k.position.y;
+            let dx = s.px_uv.x - k.px_uv.x;
+            let dy = s.px_uv.y - k.px_uv.y;
             if dx * dx + dy * dy <= r2 {
                 continue 'outer;
             }

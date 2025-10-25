@@ -624,27 +624,19 @@ pub unsafe extern "C" fn arbit_get_frame_state(
     // Get two-view summary
     if let Some(two_view) = context.engine.latest_two_view() {
         state.has_two_view = true;
-        let matrix = two_view.rotation.matrix();
+        let matrix = two_view.rotation_c2c1.matrix();
         for row in 0..3 {
             for col in 0..3 {
                 state.two_view.rotation[row * 3 + col] = matrix[(row, col)];
             }
         }
         state.two_view.translation = [
-            two_view.translation.x,
-            two_view.translation.y,
-            two_view.translation.z,
+            two_view.translation_c2c1.x,
+            two_view.translation_c2c1.y,
+            two_view.translation_c2c1.z,
         ];
         state.two_view.inliers = two_view.inliers.len() as u32;
         state.two_view.average_error = two_view.average_sampson_error;
-    }
-
-    // Get relocalization
-    if let Some(reloc) = context.engine.last_relocalization() {
-        state.has_relocalization = true;
-        state.relocalization.pose = transform_to_ffi(&reloc.pose);
-        state.relocalization.inliers = reloc.inliers.len() as u32;
-        state.relocalization.average_error = reloc.average_reprojection_error;
     }
 
     // Get map stats
@@ -732,8 +724,8 @@ pub unsafe extern "C" fn arbit_get_descriptors(
         debug_assert!(bytes.len() <= ORB_DESCRIPTOR_LEN);
 
         dst.level = seed.level as u32;
-        dst.seed_x = seed.position.x;
-        dst.seed_y = seed.position.y;
+        dst.seed_x = seed.px_uv.x;
+        dst.seed_y = seed.px_uv.y;
         dst.score = seed.score;
         dst.angle = descriptor.angle;
         dst.data_len = bytes.len();
@@ -784,7 +776,8 @@ pub unsafe extern "C" fn arbit_match_descriptors(
             FeatDescriptor {
                 seed: FeatureSeed {
                     level: d.level as usize,
-                    position: Vector2::new(d.seed_x, d.seed_y),
+                    level_scale: 1.0,
+                    px_uv: Vector2::new(d.seed_x, d.seed_y),
                     score: d.score,
                 },
                 angle: d.angle,
@@ -802,7 +795,8 @@ pub unsafe extern "C" fn arbit_match_descriptors(
             FeatDescriptor {
                 seed: FeatureSeed {
                     level: d.level as usize,
-                    position: Vector2::new(d.seed_x, d.seed_y),
+                    level_scale: 1.0,
+                    px_uv: Vector2::new(d.seed_x, d.seed_y),
                     score: d.score,
                 },
                 angle: d.angle,
@@ -859,10 +853,10 @@ pub unsafe extern "C" fn arbit_get_tracked_points(
     let dest = unsafe { slice::from_raw_parts_mut(out_points, count) };
     for (dst, track) in dest.iter_mut().zip(tracks.iter()) {
         *dst = ArbitTrackedPoint {
-            initial_x: track.initial.x,
-            initial_y: track.initial.y,
-            refined_x: track.refined.x,
-            refined_y: track.refined.y,
+            initial_x: track.initial_px_uv.x,
+            initial_y: track.initial_px_uv.y,
+            refined_x: track.refined_px_uv.x,
+            refined_y: track.refined_px_uv.y,
             residual: track.residual,
             iterations: track.iterations,
             status: track.outcome.into(),
