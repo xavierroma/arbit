@@ -13,42 +13,42 @@ import ARKit
 // MARK: - Public IMU Types
 
 /// IMU sample containing 6DOF sensor data (accelerometer + gyroscope)
-public struct ImuSample {
-    public let timestampSeconds: Double
-    public let accelX: Double
-    public let accelY: Double
-    public let accelZ: Double
-    public let gyroX: Double
-    public let gyroY: Double
-    public let gyroZ: Double
-    
-    public init(
-        timestampSeconds: Double,
-        accelX: Double, accelY: Double, accelZ: Double,
-        gyroX: Double, gyroY: Double, gyroZ: Double
-    ) {
-        self.timestampSeconds = timestampSeconds
-        self.accelX = accelX
-        self.accelY = accelY
-        self.accelZ = accelZ
-        self.gyroX = gyroX
-        self.gyroY = gyroY
-        self.gyroZ = gyroZ
-    }
-    
-    /// Convert to FFI representation
-    fileprivate func toFFI() -> ArbitFFI.ArbitImuSample {
-        ArbitFFI.ArbitImuSample(
-            timestamp_seconds: timestampSeconds,
-            accel_x: accelX,
-            accel_y: accelY,
-            accel_z: accelZ,
-            gyro_x: gyroX,
-            gyro_y: gyroY,
-            gyro_z: gyroZ
-        )
-    }
-}
+//public struct ImuSample {
+//    public let timestampSeconds: Double
+//    public let accelX: Double
+//    public let accelY: Double
+//    public let accelZ: Double
+//    public let gyroX: Double
+//    public let gyroY: Double
+//    public let gyroZ: Double
+//    
+//    public init(
+//        timestampSeconds: Double,
+//        accelX: Double, accelY: Double, accelZ: Double,
+//        gyroX: Double, gyroY: Double, gyroZ: Double
+//    ) {
+//        self.timestampSeconds = timestampSeconds
+//        self.accelX = accelX
+//        self.accelY = accelY
+//        self.accelZ = accelZ
+//        self.gyroX = gyroX
+//        self.gyroY = gyroY
+//        self.gyroZ = gyroZ
+//    }
+//    
+//    /// Convert to FFI representation
+//    fileprivate func toFFI() -> ArbitFFI.ArbitImuSample {
+//        ArbitFFI.ArbitImuSample(
+//            timestamp_seconds: timestampSeconds,
+//            accel_x: accelX,
+//            accel_y: accelY,
+//            accel_z: accelZ,
+//            gyro_x: gyroX,
+//            gyro_y: gyroY,
+//            gyro_z: gyroZ
+//        )
+//    }
+//}
 
 /// Motion state classification
 public enum MotionState: String, Sendable {
@@ -146,18 +146,6 @@ private func ffi_ingest_frame(
     _ sample: UnsafeMutablePointer<ArbitFFI.ArbitCameraSample>?
 ) -> Bool
 
-@_silgen_name("arbit_ingest_imu")
-private func ffi_ingest_imu(
-    _ handle: OpaquePointer?,
-    _ sample: ArbitFFI.ArbitImuSample
-) -> Bool
-
-@_silgen_name("arbit_get_imu_state")
-private func ffi_get_imu_state(
-    _ handle: OpaquePointer?,
-    _ state: UnsafeMutablePointer<ArbitFFI.ArbitImuState>?
-) -> Bool
-
 @_silgen_name("arbit_get_frame_state")
 private func ffi_get_frame_state(
     _ handle: OpaquePointer?,
@@ -184,84 +172,6 @@ private func ffi_get_trajectory(
     _ samples: UnsafeMutablePointer<ArbitFFI.ArbitPoseSample>?,
     _ maxPoints: Int
 ) -> Int
-
-@_silgen_name("arbit_list_anchors")
-private func ffi_list_anchors(
-    _ handle: OpaquePointer?,
-    _ ids: UnsafeMutablePointer<UInt64>?,
-    _ maxIds: Int
-) -> Int
-
-@_silgen_name("arbit_create_anchor")
-private func ffi_create_anchor(
-    _ handle: OpaquePointer?,
-    _ pose: UnsafePointer<ArbitFFI.ArbitTransform>?,
-    _ outId: UnsafeMutablePointer<UInt64>?
-) -> Bool
-
-@_silgen_name("arbit_get_anchor")
-private func ffi_get_anchor(
-    _ handle: OpaquePointer?,
-    _ anchorId: UInt64,
-    _ outPose: UnsafeMutablePointer<ArbitFFI.ArbitTransform>?
-) -> Bool
-
-@_silgen_name("arbit_update_anchor")
-private func ffi_update_anchor(
-    _ handle: OpaquePointer?,
-    _ anchorId: UInt64,
-    _ pose: UnsafePointer<ArbitFFI.ArbitTransform>?
-) -> Bool
-
-@_silgen_name("arbit_remove_anchor")
-private func ffi_remove_anchor(
-    _ handle: OpaquePointer?,
-    _ anchorId: UInt64
-) -> Bool
-
-@_silgen_name("arbit_place_anchor_at_screen_point")
-private func ffi_place_anchor_at_screen_point(
-    _ handle: OpaquePointer?,
-    _ normalizedU: Double,
-    _ normalizedV: Double,
-    _ depth: Double,
-    _ outAnchorId: UnsafeMutablePointer<UInt64>?
-) -> Bool
-
-@_silgen_name("arbit_get_visible_anchors")
-private func ffi_get_visible_anchors(
-    _ handle: OpaquePointer?,
-    _ outAnchors: UnsafeMutablePointer<ArbitFFI.ArbitProjectedAnchor>?,
-    _ maxAnchors: Int
-) -> Int
-
-@_silgen_name("arbit_get_visible_landmarks")
-private func ffi_get_visible_landmarks(
-    _ handle: OpaquePointer?,
-    _ outLandmarks: UnsafeMutablePointer<ArbitFFI.ArbitProjectedLandmark>?,
-    _ maxLandmarks: Int
-) -> Int
-
-@_silgen_name("arbit_get_map_debug_snapshot")
-private func ffi_get_map_debug_snapshot(
-    _ handle: OpaquePointer?,
-    _ outSnapshot: UnsafeMutablePointer<ArbitFFI.ArbitMapDebugSnapshot>?
-) -> Bool
-
-@_silgen_name("arbit_save_map")
-private func ffi_save_map(
-    _ handle: OpaquePointer?,
-    _ buffer: UnsafeMutablePointer<UInt8>?,
-    _ bufferLen: Int,
-    _ written: UnsafeMutablePointer<Int>?
-) -> Bool
-
-@_silgen_name("arbit_load_map")
-private func ffi_load_map(
-    _ handle: OpaquePointer?,
-    _ data: UnsafePointer<UInt8>?,
-    _ dataLen: Int
-) -> Bool
 
 public enum CameraPixelFormat: UInt32, CaseIterable, Sendable {
     case bgra8 = 0
@@ -546,80 +456,56 @@ public struct MapStats: Sendable {
         self.anchors = anchors
     }
 }
-
-/// An anchor projected into screen space with visibility information
-public struct ProjectedAnchor: Sendable {
-    /// The anchor identifier
-    public let anchorId: UInt64
-    /// The anchor's world pose (4x4 transformation matrix)
-    public let pose: simd_double4x4
-    /// Optional keyframe ID this anchor was created from
-    public let createdFromKeyframe: UInt64?
-    /// Normalized image coordinates in range [0, 1]
-    public let normalizedU: Double
-    public let normalizedV: Double
-    /// Pixel coordinates in the current frame
-    public let pixelX: Float
-    public let pixelY: Float
-    /// Depth from camera in meters
-    public let depth: Double
-    
-    init(ffiValue: ArbitFFI.ArbitProjectedAnchor) {
-        anchorId = ffiValue.anchor_id
-        pose = matrixFromArbitTransform(ffiValue.pose)
-        createdFromKeyframe = ffiValue.has_keyframe ? ffiValue.created_from_keyframe : nil
-        normalizedU = ffiValue.normalized_u
-        normalizedV = ffiValue.normalized_v
-        pixelX = ffiValue.pixel_x
-        pixelY = ffiValue.pixel_y
-        depth = ffiValue.depth
-    }
-}
-
-/// A landmark projected into screen space for debugging
-public struct ProjectedLandmark: Sendable {
-    public let landmarkId: UInt64
-    public let worldPosition: SIMD3<Double>
-    public let normalizedU: Double
-    public let normalizedV: Double
-    public let pixelX: Float
-    public let pixelY: Float
-    public let depth: Double
-    
-    init(ffiValue: ArbitFFI.ArbitProjectedLandmark) {
-        landmarkId = ffiValue.landmark_id
-        worldPosition = SIMD3(ffiValue.world_x, ffiValue.world_y, ffiValue.world_z)
-        normalizedU = ffiValue.normalized_u
-        normalizedV = ffiValue.normalized_v
-        pixelX = ffiValue.pixel_x
-        pixelY = ffiValue.pixel_y
-        depth = ffiValue.depth
-    }
-}
-
-/// Debug snapshot of the map state
-public struct MapDebugSnapshot: Sendable {
-    public let cameraPosition: SIMD3<Double>
-    public let cameraRotation: simd_double3x3
-    public let landmarkCount: UInt64
-    public let keyframeCount: UInt64
-    public let anchorCount: UInt64
-    
-    init(ffiValue: ArbitFFI.ArbitMapDebugSnapshot) {
-        cameraPosition = SIMD3(ffiValue.camera_x, ffiValue.camera_y, ffiValue.camera_z)
-        
-        let r = ffiValue.camera_rotation
-        cameraRotation = simd_double3x3(
-            SIMD3(r.0, r.1, r.2),
-            SIMD3(r.3, r.4, r.5),
-            SIMD3(r.6, r.7, r.8)
-        )
-        
-        landmarkCount = ffiValue.landmark_count
-        keyframeCount = ffiValue.keyframe_count
-        anchorCount = ffiValue.anchor_count
-    }
-}
+//
+///// An anchor projected into screen space with visibility information
+//public struct ProjectedAnchor: Sendable {
+//    /// The anchor identifier
+//    public let anchorId: UInt64
+//    /// The anchor's world pose (4x4 transformation matrix)
+//    public let pose: simd_double4x4
+//    /// Optional keyframe ID this anchor was created from
+//    public let createdFromKeyframe: UInt64?
+//    /// Normalized image coordinates in range [0, 1]
+//    public let normalizedU: Double
+//    public let normalizedV: Double
+//    /// Pixel coordinates in the current frame
+//    public let pixelX: Float
+//    public let pixelY: Float
+//    /// Depth from camera in meters
+//    public let depth: Double
+//    
+//    init(ffiValue: ArbitFFI.ArbitProjectedAnchor) {
+//        anchorId = ffiValue.anchor_id
+//        pose = matrixFromArbitTransform(ffiValue.pose)
+//        createdFromKeyframe = ffiValue.has_keyframe ? ffiValue.created_from_keyframe : nil
+//        normalizedU = ffiValue.normalized_u
+//        normalizedV = ffiValue.normalized_v
+//        pixelX = ffiValue.pixel_x
+//        pixelY = ffiValue.pixel_y
+//        depth = ffiValue.depth
+//    }
+//}
+//
+///// A landmark projected into screen space for debugging
+//public struct ProjectedLandmark: Sendable {
+//    public let landmarkId: UInt64
+//    public let worldPosition: SIMD3<Double>
+//    public let normalizedU: Double
+//    public let normalizedV: Double
+//    public let pixelX: Float
+//    public let pixelY: Float
+//    public let depth: Double
+//    
+//    init(ffiValue: ArbitFFI.ArbitProjectedLandmark) {
+//        landmarkId = ffiValue.landmark_id
+//        worldPosition = SIMD3(ffiValue.world_x, ffiValue.world_y, ffiValue.world_z)
+//        normalizedU = ffiValue.normalized_u
+//        normalizedV = ffiValue.normalized_v
+//        pixelX = ffiValue.pixel_x
+//        pixelY = ffiValue.pixel_y
+//        depth = ffiValue.depth
+//    }
+//}
 
 public struct RelocalizationSummary: Sendable {
     public var pose: simd_double4x4
@@ -728,25 +614,25 @@ public final class ArbitCaptureContext: @unchecked Sendable {
 
         return sample
     }
-
-    /// Ingest a full 6DOF IMU sample (accelerometer + gyroscope)
-    /// This is the preferred method for feeding IMU data as it enables preintegration
-    public func ingestIMUSample(_ sample: ImuSample) throws {
-        guard ffi_ingest_imu(handle, sample.toFFI()) else {
-            throw ArbitCaptureError.ingestionFailed
-        }
-    }
-    
-    // MARK: - Simplified API Methods
-    
-    /// Get unified IMU state in a single call (replaces multiple IMU queries)
-    public func getImuState() -> ImuState? {
-        var ffiState = ArbitFFI.ArbitImuState()
-        if ffi_get_imu_state(handle, &ffiState) {
-            return ImuState(ffiValue: ffiState)
-        }
-        return nil
-    }
+//
+//    /// Ingest a full 6DOF IMU sample (accelerometer + gyroscope)
+//    /// This is the preferred method for feeding IMU data as it enables preintegration
+//    public func ingestIMUSample(_ sample: ImuSample) throws {
+//        guard ffi_ingest_imu(handle, sample.toFFI()) else {
+//            throw ArbitCaptureError.ingestionFailed
+//        }
+//    }
+//    
+//    // MARK: - Simplified API Methods
+//    
+//    /// Get unified IMU state in a single call (replaces multiple IMU queries)
+//    public func getImuState() -> ImuState? {
+//        var ffiState = ArbitFFI.ArbitImuState()
+//        if ffi_get_imu_state(handle, &ffiState) {
+//            return ImuState(ffiValue: ffiState)
+//        }
+//        return nil
+//    }
     
     /// Get comprehensive frame state in a single call (replaces 7+ separate queries)
     /// This is the preferred method for getting all frame-related state efficiently.
@@ -832,142 +718,142 @@ public final class ArbitCaptureContext: @unchecked Sendable {
         }
         return samples
     }
-
-    public func anchorIds(maxCount: Int = 16) -> [UInt64] {
-        guard maxCount > 0 else { return [] }
-        var buffer = Array(repeating: UInt64(0), count: maxCount)
-        let written = ffi_list_anchors(handle, &buffer, maxCount)
-        guard written > 0 else { return [] }
-        return Array(buffer.prefix(written))
-    }
-
-    public func createAnchor(pose: simd_double4x4) -> UInt64? {
-        var anchorId: UInt64 = 0
-        var transform = makeArbitTransform(from: pose)
-        let success = withUnsafePointer(to: &transform) { pointer in
-            ffi_create_anchor(handle, pointer, &anchorId)
-        }
-        return success ? anchorId : nil
-    }
-
-    public func resolveAnchor(_ anchorId: UInt64) -> simd_double4x4? {
-        var transform = ArbitFFI.ArbitTransform()
-        let success = withUnsafeMutablePointer(to: &transform) { pointer in
-            ffi_get_anchor(handle, anchorId, pointer)
-        }
-        return success ? matrixFromArbitTransform(transform) : nil
-    }
-
-    public func updateAnchor(_ anchorId: UInt64, pose: simd_double4x4) -> Bool {
-        var transform = makeArbitTransform(from: pose)
-        return withUnsafePointer(to: &transform) { pointer in
-            ffi_update_anchor(handle, anchorId, pointer)
-        }
-    }
-    
-    /// Remove an anchor by its identifier
-    /// - Parameter anchorId: The identifier of the anchor to remove
-    /// - Returns: `true` if the anchor was removed, `false` if it didn't exist
-    public func removeAnchor(_ anchorId: UInt64) -> Bool {
-        ffi_remove_anchor(handle, anchorId)
-    }
-    
-    /// Place an anchor by raycasting from a screen point into the scene
-    /// The engine uses its current camera pose and intrinsics to compute the world position
-    /// - Parameters:
-    ///   - normalizedU: Horizontal screen coordinate in range [0, 1]
-    ///   - normalizedV: Vertical screen coordinate in range [0, 1]
-    ///   - depth: Distance along the ray in meters (default: 1.0)
-    /// - Returns: The new anchor ID, or `nil` if placement failed
-    public func placeAnchorAtScreenPoint(
-        normalizedU: Double,
-        normalizedV: Double,
-        depth: Double = 1.0
-    ) -> UInt64? {
-        var anchorId: UInt64 = 0
-        let success = ffi_place_anchor_at_screen_point(
-            handle,
-            normalizedU,
-            normalizedV,
-            depth,
-            &anchorId
-        )
-        return success ? anchorId : nil
-    }
-    
-    /// Get all anchors visible in the current camera frame with their projected screen coordinates
-    /// - Parameter maxCount: Maximum number of anchors to return (default: 32)
-    /// - Returns: Array of projected anchors that are visible (in front of camera and within frame bounds)
-    public func getVisibleAnchors(maxCount: Int = 32) -> [ProjectedAnchor] {
-        var buffer = [ArbitFFI.ArbitProjectedAnchor](
-            repeating: ArbitFFI.ArbitProjectedAnchor(),
-            count: maxCount
-        )
-        let written = ffi_get_visible_anchors(handle, &buffer, maxCount)
-        return buffer.prefix(written).map { ProjectedAnchor(ffiValue: $0) }
-    }
-    
-    /// Get all visible landmarks in the current camera frame (for debugging visualization)
-    /// - Parameter maxCount: Maximum number of landmarks to return (default: 200)
-    /// - Returns: Array of projected landmarks with 3D world positions and screen coordinates
-    public func getVisibleLandmarks(maxCount: Int = 200) -> [ProjectedLandmark] {
-        var buffer = [ArbitFFI.ArbitProjectedLandmark](
-            repeating: ArbitFFI.ArbitProjectedLandmark(),
-            count: maxCount
-        )
-        let written = ffi_get_visible_landmarks(handle, &buffer, maxCount)
-        return buffer.prefix(written).map { ProjectedLandmark(ffiValue: $0) }
-    }
-    
-    /// Get a debug snapshot of the current map state
-    /// - Returns: Snapshot containing camera pose and map statistics
-    public func getMapDebugSnapshot() -> MapDebugSnapshot? {
-        var snapshot = ArbitFFI.ArbitMapDebugSnapshot()
-        if ffi_get_map_debug_snapshot(handle, &snapshot) {
-            return MapDebugSnapshot(ffiValue: snapshot)
-        }
-        return nil
-    }
-
-    public func saveMap() throws -> Data {
-        var required = 0
-        let query = ffi_save_map(handle, nil, 0, &required)
-        if query && required == 0 {
-            return Data()
-        }
-        guard required >= 0 else {
-            throw ArbitCaptureError.mapSaveFailed
-        }
-
-        var data = Data(count: required)
-        let saved = data.withUnsafeMutableBytes { buffer -> Bool in
-            guard let baseAddress = buffer.bindMemory(to: UInt8.self).baseAddress else {
-                return false
-            }
-            return ffi_save_map(handle, baseAddress, required, &required)
-        }
-        guard saved else {
-            throw ArbitCaptureError.mapSaveFailed
-        }
-
-        data.count = required
-        return data
-    }
-
-    public func loadMap(_ data: Data) throws {
-        guard !data.isEmpty else {
-            throw ArbitCaptureError.mapLoadFailed
-        }
-        let loaded = data.withUnsafeBytes { buffer -> Bool in
-            guard let baseAddress = buffer.bindMemory(to: UInt8.self).baseAddress else {
-                return false
-            }
-            return ffi_load_map(handle, baseAddress, buffer.count)
-        }
-        guard loaded else {
-            throw ArbitCaptureError.mapLoadFailed
-        }
-    }
+//
+//    public func anchorIds(maxCount: Int = 16) -> [UInt64] {
+//        guard maxCount > 0 else { return [] }
+//        var buffer = Array(repeating: UInt64(0), count: maxCount)
+//        let written = ffi_list_anchors(handle, &buffer, maxCount)
+//        guard written > 0 else { return [] }
+//        return Array(buffer.prefix(written))
+//    }
+//
+//    public func createAnchor(pose: simd_double4x4) -> UInt64? {
+//        var anchorId: UInt64 = 0
+//        var transform = makeArbitTransform(from: pose)
+//        let success = withUnsafePointer(to: &transform) { pointer in
+//            ffi_create_anchor(handle, pointer, &anchorId)
+//        }
+//        return success ? anchorId : nil
+//    }
+//
+//    public func resolveAnchor(_ anchorId: UInt64) -> simd_double4x4? {
+//        var transform = ArbitFFI.ArbitTransform()
+//        let success = withUnsafeMutablePointer(to: &transform) { pointer in
+//            ffi_get_anchor(handle, anchorId, pointer)
+//        }
+//        return success ? matrixFromArbitTransform(transform) : nil
+//    }
+//
+//    public func updateAnchor(_ anchorId: UInt64, pose: simd_double4x4) -> Bool {
+//        var transform = makeArbitTransform(from: pose)
+//        return withUnsafePointer(to: &transform) { pointer in
+//            ffi_update_anchor(handle, anchorId, pointer)
+//        }
+//    }
+//    
+//    /// Remove an anchor by its identifier
+//    /// - Parameter anchorId: The identifier of the anchor to remove
+//    /// - Returns: `true` if the anchor was removed, `false` if it didn't exist
+//    public func removeAnchor(_ anchorId: UInt64) -> Bool {
+//        ffi_remove_anchor(handle, anchorId)
+//    }
+//    
+//    /// Place an anchor by raycasting from a screen point into the scene
+//    /// The engine uses its current camera pose and intrinsics to compute the world position
+//    /// - Parameters:
+//    ///   - normalizedU: Horizontal screen coordinate in range [0, 1]
+//    ///   - normalizedV: Vertical screen coordinate in range [0, 1]
+//    ///   - depth: Distance along the ray in meters (default: 1.0)
+//    /// - Returns: The new anchor ID, or `nil` if placement failed
+//    public func placeAnchorAtScreenPoint(
+//        normalizedU: Double,
+//        normalizedV: Double,
+//        depth: Double = 1.0
+//    ) -> UInt64? {
+//        var anchorId: UInt64 = 0
+//        let success = ffi_place_anchor_at_screen_point(
+//            handle,
+//            normalizedU,
+//            normalizedV,
+//            depth,
+//            &anchorId
+//        )
+//        return success ? anchorId : nil
+//    }
+//    
+//    /// Get all anchors visible in the current camera frame with their projected screen coordinates
+//    /// - Parameter maxCount: Maximum number of anchors to return (default: 32)
+//    /// - Returns: Array of projected anchors that are visible (in front of camera and within frame bounds)
+//    public func getVisibleAnchors(maxCount: Int = 32) -> [ProjectedAnchor] {
+//        var buffer = [ArbitFFI.ArbitProjectedAnchor](
+//            repeating: ArbitFFI.ArbitProjectedAnchor(),
+//            count: maxCount
+//        )
+//        let written = ffi_get_visible_anchors(handle, &buffer, maxCount)
+//        return buffer.prefix(written).map { ProjectedAnchor(ffiValue: $0) }
+//    }
+//    
+//    /// Get all visible landmarks in the current camera frame (for debugging visualization)
+//    /// - Parameter maxCount: Maximum number of landmarks to return (default: 200)
+//    /// - Returns: Array of projected landmarks with 3D world positions and screen coordinates
+//    public func getVisibleLandmarks(maxCount: Int = 200) -> [ProjectedLandmark] {
+//        var buffer = [ArbitFFI.ArbitProjectedLandmark](
+//            repeating: ArbitFFI.ArbitProjectedLandmark(),
+//            count: maxCount
+//        )
+//        let written = ffi_get_visible_landmarks(handle, &buffer, maxCount)
+//        return buffer.prefix(written).map { ProjectedLandmark(ffiValue: $0) }
+//    }
+//    
+//    /// Get a debug snapshot of the current map state
+//    /// - Returns: Snapshot containing camera pose and map statistics
+//    public func getMapDebugSnapshot() -> MapDebugSnapshot? {
+//        var snapshot = ArbitFFI.ArbitMapDebugSnapshot()
+//        if ffi_get_map_debug_snapshot(handle, &snapshot) {
+//            return MapDebugSnapshot(ffiValue: snapshot)
+//        }
+//        return nil
+//    }
+//
+//    public func saveMap() throws -> Data {
+//        var required = 0
+//        let query = ffi_save_map(handle, nil, 0, &required)
+//        if query && required == 0 {
+//            return Data()
+//        }
+//        guard required >= 0 else {
+//            throw ArbitCaptureError.mapSaveFailed
+//        }
+//
+//        var data = Data(count: required)
+//        let saved = data.withUnsafeMutableBytes { buffer -> Bool in
+//            guard let baseAddress = buffer.bindMemory(to: UInt8.self).baseAddress else {
+//                return false
+//            }
+//            return ffi_save_map(handle, baseAddress, required, &required)
+//        }
+//        guard saved else {
+//            throw ArbitCaptureError.mapSaveFailed
+//        }
+//
+//        data.count = required
+//        return data
+//    }
+//
+//    public func loadMap(_ data: Data) throws {
+//        guard !data.isEmpty else {
+//            throw ArbitCaptureError.mapLoadFailed
+//        }
+//        let loaded = data.withUnsafeBytes { buffer -> Bool in
+//            guard let baseAddress = buffer.bindMemory(to: UInt8.self).baseAddress else {
+//                return false
+//            }
+//            return ffi_load_map(handle, baseAddress, buffer.count)
+//        }
+//        guard loaded else {
+//            throw ArbitCaptureError.mapLoadFailed
+//        }
+//    }
 }
 
 #if canImport(ARKit) && !os(macOS)

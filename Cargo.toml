@@ -5,6 +5,5 @@ members = [
     "crates/arbit-engine",
     "crates/arbit-ffi",
     "crates/arbit-swift",
-    "crates/arbit-cli"
 ]
 resolver = "2"

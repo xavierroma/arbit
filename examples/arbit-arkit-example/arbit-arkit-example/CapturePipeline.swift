@@ -48,9 +48,9 @@ final class CameraCaptureManager: NSObject, ObservableObject {
     @Published private(set) var imu: ImuState?
     @Published private(set) var mapStats: MapStats = MapStats(keyframes: 0, landmarks: 0, anchors: 0)
     @Published private(set) var anchorPoses: [UInt64: simd_double4x4] = [:]
-    @Published private(set) var visibleAnchors: [ProjectedAnchor] = []
-    @Published private(set) var visibleLandmarks: [ProjectedLandmark] = []
-    @Published private(set) var mapDebugSnapshot: MapDebugSnapshot?
+//    @Published private(set) var visibleAnchors: [ProjectedAnchor] = []
+//    @Published private(set) var visibleLandmarks: [ProjectedLandmark] = []
+//    @Published private(set) var mapDebugSnapshot: MapDebugSnapshot?
     @Published private(set) var relocalizationSummary: RelocalizationSummary?
     @Published private(set) var lastPoseMatrix: simd_double4x4?
     @Published private(set) var mapStatusMessage: String?
@@ -92,7 +92,6 @@ final class CameraCaptureManager: NSObject, ObservableObject {
         switch authorizationStatus {
         case .authorized:
             configureAndStartSession()
-            startIMUUpdates()
         case .notDetermined:
             requestAuthorization()
         case .denied, .restricted:
@@ -108,84 +107,8 @@ final class CameraCaptureManager: NSObject, ObservableObject {
             if self.session.isRunning {
                 self.session.stopRunning()
             }
-            self.stopIMUUpdates()
             DispatchQueue.main.async {
                 self.isRunning = false
-            }
-        }
-    }
-
-    func placeAnchor() {
-        guard let context else { return }
-        let pose = lastPoseMatrix ?? matrix_identity_double4x4
-        sampleQueue.async { [weak self] in
-            guard let _ = self else { return }
-            _ = context.createAnchor(pose: pose)
-            let translation = SIMD3(pose.columns.3.x, pose.columns.3.y, pose.columns.3.z)
-            self?.logger.info(
-                "Placed anchor at [\(translation.x, format: .fixed(precision: 2)), \(translation.y, format: .fixed(precision: 2)), \(translation.z, format: .fixed(precision:2))]"
-            )
-        }
-    }
-    
-    func placeAnchorAtScreenPoint(normalizedU: Double, normalizedV: Double, depth: Double = 1.0) {
-        guard let context else { return }
-        
-        sampleQueue.async { [weak self] in
-            guard let self = self else { return }
-            
-            // Let the engine compute the ray and world position using its authoritative state
-            if let anchorId = context.placeAnchorAtScreenPoint(
-                normalizedU: normalizedU,
-                normalizedV: normalizedV,
-                depth: depth
-            ) {
-                self.logger.info("Placed anchor #\(anchorId) at screen (\(normalizedU, format: .fixed(precision: 3)), \(normalizedV, format: .fixed(precision: 3))) depth \(depth, format: .fixed(precision: 2))m")
-            } else {
-                self.logger.warning("Failed to place anchor - engine may not be initialized")
-            }
-        }
-    }
-
-    func saveMapSnapshot() {
-        guard let context else { return }
-        sampleQueue.async { [weak self] in
-            guard let self else { return }
-            do {
-                let data = try context.saveMap()
-                self.savedMapData = data
-                self.logger.info("Saved map snapshot (\(data.count, format: .decimal) bytes)")
-                DispatchQueue.main.async {
-                    self.mapStatusMessage = String(format: "Saved map (%d bytes)", data.count)
-                }
-            } catch {
-                self.logger.error("Failed to save map snapshot: \(error.localizedDescription, privacy: .public)")
-                DispatchQueue.main.async {
-                    self.mapStatusMessage = "Failed to save map"
-                }
-            }
-        }
-    }
-
-    func loadSavedMap() {
-        guard let context else { return }
-        guard let data = savedMapData else {
-            mapStatusMessage = "No saved map snapshot"
-            return
-        }
-        sampleQueue.async { [weak self] in
-            guard let self else { return }
-            do {
-                try context.loadMap(data)
-                self.logger.info("Loaded map snapshot")
-                DispatchQueue.main.async {
-                    self.mapStatusMessage = "Map loaded"
-                }
-            } catch {
-                self.logger.error("Failed to load map snapshot: \(error.localizedDescription, privacy: .public)")
-                DispatchQueue.main.async {
-                    self.mapStatusMessage = "Failed to load map"
-                }
             }
         }
     }
@@ -382,74 +305,6 @@ final class CameraCaptureManager: NSObject, ObservableObject {
         sessionConfigured = true
     }
     
-    // MARK: - IMU Management
-    
-    private func startIMUUpdates() {
-        guard motionManager.isDeviceMotionAvailable else {
-            logger.warning("Device motion (IMU) not available")
-            return
-        }
-        
-        // Set update interval to 500 Hz (2ms)
-        motionManager.deviceMotionUpdateInterval = 1.0 / 500.0
-        
-        // Start device motion updates (includes both accel and gyro)
-        motionManager.startDeviceMotionUpdates(to: motionQueue) { [weak self] motion, error in
-            guard let self = self, let motion = motion, error == nil else {
-                if let error = error {
-                    self?.logger.error("IMU update error: \(error.localizedDescription)")
-                }
-                return
-            }
-            
-            self.ingestIMUSample(motion)
-        }
-        
-        logger.info("Started IMU updates at 500 Hz")
-    }
-    
-    private func stopIMUUpdates() {
-        if motionManager.isDeviceMotionActive {
-            motionManager.stopDeviceMotionUpdates()
-            logger.info("Stopped IMU updates")
-        }
-    }
-    
-    private func ingestIMUSample(_ motion: CMDeviceMotion) {
-        guard let context = context else { return }
-        
-        // Use userAcceleration (linear accel, gravity already removed by iOS)
-        let userAccel = motion.userAcceleration
-        
-        // Convert from g to m/s²
-        let accel = (
-            x: userAccel.x * 9.80665,
-            y: userAccel.y * 9.80665,
-            z: userAccel.z * 9.80665
-        )
-        
-        // Get gyroscope data (rotation rate in rad/s)
-        let gyro = motion.rotationRate
-        
-        // Create IMU sample
-        let sample = ImuSample(
-            timestampSeconds: motion.timestamp,
-            accelX: accel.x,
-            accelY: accel.y,
-            accelZ: accel.z,
-            gyroX: gyro.x,
-            gyroY: gyro.y,
-            gyroZ: gyro.z
-        )
-        
-        // Feed to Rust engine (non-blocking)
-        do {
-            try context.ingestIMUSample(sample)
-        } catch {
-            // Log but don't spam - IMU samples arrive at 500 Hz
-            logger.debug("Failed to ingest IMU sample: \(error.localizedDescription)")
-        }
-    }
 }
 
 extension CameraCaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate {
@@ -548,22 +403,12 @@ extension CameraCaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         let pyramid = context.pyramidLevels(maxLevels: 3)
         let tracks = context.trackedPoints(maxPoints: 200)
         let frameState = context.getFrameState()
-        let imuState = context.getImuState()
         let twoView = frameState?.twoView
         let trajectory = context.trajectory(maxPoints: 256)
-        let anchorIDs = context.anchorIds(maxCount: 16)
         var anchorDictionary: [UInt64: simd_double4x4] = [:]
-        for id in anchorIDs {
-            if let pose = context.resolveAnchor(id) {
-                anchorDictionary[id] = pose
-            }
-        }
         let relocalization = frameState?.relocalization
         let latestPoseMatrix = trajectory.last.map { self.poseMatrix(from: $0) }
-        let projectedAnchors = context.getVisibleAnchors(maxCount: 32)
-        let projectedLandmarks = context.getVisibleLandmarks(maxCount: 200)
-        let debugSnapshot = context.getMapDebugSnapshot()
-
+        
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.lastSample = captured
@@ -571,14 +416,10 @@ extension CameraCaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate {
             self.trackedPoints = tracks
             self.twoViewSummary = twoView
             self.trajectory = trajectory
-            self.imu = imuState
             self.mapStats = MapStats(keyframes: frameState?.keyframeCount ?? 0,
                                      landmarks: frameState?.landmarkCount ?? 0,
                                      anchors: frameState?.anchorCount ?? 0)
             self.anchorPoses = anchorDictionary
-            self.visibleAnchors = projectedAnchors
-            self.visibleLandmarks = projectedLandmarks
-            self.mapDebugSnapshot = debugSnapshot
             self.relocalizationSummary = relocalization
             self.lastPoseMatrix = latestPoseMatrix
         }

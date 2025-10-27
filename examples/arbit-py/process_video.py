@@ -244,7 +244,7 @@ engine = arbit.ArbitEngine()
 print("   ✓ Engine initialized")
 
 # Open video file
-video_path = "4.MOV"
+video_path = "5.MOV"
 print(f"\n2. Loading video: {video_path}...")
 cap = cv2.VideoCapture(video_path)
 
@@ -409,7 +409,7 @@ while processed_frames < len(frames_bgra):
             vis_frame = draw_stats_panel(vis_frame, stats, processing_fps)
 
             # Check if current frame is a keyframe (every 60 frames, matching engine logic)
-            is_keyframe = processed_frames % 60 == 0
+            is_keyframe = processed_frames % 10 == 0
             if is_keyframe:
                 descriptors = engine.get_descriptors(2048)
                 if descriptors:  # Only add if descriptors are available
@@ -455,6 +455,7 @@ while processed_frames < len(frames_bgra):
         viz_mode = 4
         print("\n   🎨 Switched to: Circles with arrows (SLAM papers)")
 
+sleep(100000)
 cap.release()
 cv2.destroyAllWindows()
 

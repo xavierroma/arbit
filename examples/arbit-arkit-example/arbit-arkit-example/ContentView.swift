@@ -63,22 +63,6 @@ struct ContentView: View {
                 )
                 .allowsHitTesting(false)
             }
-            
-            if selectedMilestone == .anchors {
-                MilestoneEightTouchOverlay(cameraManager: cameraManager)
-                
-                MapLandmarksOverlay(
-                    landmarks: cameraManager.visibleLandmarks,
-                    intrinsics: cameraManager.lastSample?.intrinsics
-                )
-                .allowsHitTesting(false)
-                
-                MilestoneEightCubesOverlay(
-                    visibleAnchors: cameraManager.visibleAnchors,
-                    intrinsics: cameraManager.lastSample?.intrinsics
-                )
-                .allowsHitTesting(false)
-            }
 
             VStack {
                 HStack(alignment: .top) {
@@ -132,12 +116,9 @@ struct ContentView: View {
             MilestoneEightPanel(
                 stats: cameraManager.mapStats,
                 anchors: cameraManager.anchorPoses,
-                visibleAnchors: cameraManager.visibleAnchors,
                 lastPose: cameraManager.lastPoseMatrix,
                 statusMessage: cameraManager.mapStatusMessage,
-                saveMap: cameraManager.saveMapSnapshot,
-                loadMap: cameraManager.loadSavedMap
-            )
+                )
         }
     }
 
@@ -404,12 +385,10 @@ private struct MilestoneSixPanel: View {
 private struct MilestoneEightPanel: View {
     let stats: MapStats
     let anchors: [UInt64: simd_double4x4]
-    let visibleAnchors: [ProjectedAnchor]
+//    let visibleAnchors: [ProjectedAnchor]
     let lastPose: simd_double4x4?
     let statusMessage: String?
-    let saveMap: () -> Void
-    let loadMap: () -> Void
-
+    
     private var sortedAnchors: [(UInt64, simd_double4x4)] {
         anchors.sorted { $0.key < $1.key }
     }
@@ -451,30 +430,7 @@ private struct MilestoneEightPanel: View {
                 .font(.system(.caption2, design: .monospaced))
                 .foregroundStyle(.cyan)
 
-            HStack(spacing: 8) {
-                Button(action: saveMap) {
-                    Text("Save")
-                        .font(.system(.caption, design: .monospaced))
-                        .padding(.vertical, 4)
-                        .padding(.horizontal, 12)
-                        .background(Color.green.opacity(0.7), in: Capsule())
-                        .foregroundStyle(.white)
-                }
-
-                Button(action: loadMap) {
-                    Text("Load")
-                        .font(.system(.caption, design: .monospaced))
-                        .padding(.vertical, 4)
-                        .padding(.horizontal, 12)
-                        .background(Color.orange.opacity(0.7), in: Capsule())
-                        .foregroundStyle(.white)
-                }
-            }
-
-            if !visibleAnchors.isEmpty {
-                Text("Anchors visible: \(visibleAnchors.count)")
-                    .font(.system(.caption2, design: .monospaced))
-            }
+           
 
             if let statusMessage {
                 Text(statusMessage)
@@ -566,6 +522,13 @@ private struct TrackedPointsOverlay: View {
                             let endDot = CGRect(x: x1 - 2.5, y: y1 - 2.5, width: 5.0, height: 5.0)
                             context.fill(Path(ellipseIn: endDot), with: .color(color))
                         }
+
+                        // Label the feature with its persistent track identifier
+                        let labelPosition = CGPoint(x: x1 + 6.0, y: y1 - 6.0)
+                        let labelText = Text("#\(point.trackID)")
+                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            .foregroundStyle(Color.white.opacity(0.9))
+                        context.draw(labelText, at: labelPosition, anchor: .topLeading)
                     }
                 }
             }
@@ -573,191 +536,59 @@ private struct TrackedPointsOverlay: View {
     }
 }
 
-private struct MilestoneEightTouchOverlay: View {
-    @ObservedObject var cameraManager: CameraCaptureManager
-    
-    var body: some View {
-        GeometryReader { geo in
-            Color.clear
-                .contentShape(Rectangle())
-                .onTapGesture { location in
-                    placeAnchorAtTap(location: location, size: geo.size)
-                }
-        }
-    }
-    
-    private func placeAnchorAtTap(location: CGPoint, size: CGSize) {
-        guard size.width > 0, size.height > 0 else {
-            return
-        }
-        
-        // Convert tap location to normalized screen coordinates [0, 1]
-        let normalizedU = Double(location.x / size.width)
-        let normalizedV = Double(location.y / size.height)
-        
-        // Let the engine handle ray computation and world transformation
-        cameraManager.placeAnchorAtScreenPoint(
-            normalizedU: normalizedU,
-            normalizedV: normalizedV,
-            depth: 1.0
-        )
-    }
-}
 
-private struct MilestoneEightCubesOverlay: View {
-    let visibleAnchors: [ProjectedAnchor]
-    let intrinsics: IntrinsicsSummary?
-    
-    var body: some View {
-        GeometryReader { geo in
-            let width = CGFloat(intrinsics?.width ?? 0)
-            let height = CGFloat(intrinsics?.height ?? 0)
-            
-            if width <= 0 || height <= 0 {
-                Color.clear
-            } else {
-                Canvas { context, size in
-                    for anchor in visibleAnchors {
-                        // Convert pixel coordinates to screen coordinates
-                        let u = CGFloat(anchor.pixelX) / width
-                        let v = CGFloat(anchor.pixelY) / height
-                        let x = u * size.width
-                        let y = v * size.height
-                        
-                        // Calculate cube size based on depth (perspective)
-                        let baseSize: CGFloat = 60.0
-                        let perspectiveSize = baseSize / CGFloat(max(anchor.depth, 0.5))
-                        let cubeSize = min(perspectiveSize, baseSize)
-                        
-                        // Draw cube wireframe
-                        drawCube(context: &context, center: CGPoint(x: x, y: y), size: cubeSize)
-                        
-                        // Draw anchor ID label
-                        let idText = Text("#\(anchor.anchorId)")
-                            .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            .foregroundStyle(.white)
-                        
-                        context.draw(idText, at: CGPoint(x: x, y: y - cubeSize / 2 - 12))
-                    }
-                }
-            }
-        }
-    }
-    
-    private func drawCube(context: inout GraphicsContext, center: CGPoint, size: CGFloat) {
-        let halfSize = size / 2.0
-        let offset3D: CGFloat = size * 0.3 // Pseudo-3D offset
-        
-        // Back face (smaller, offset)
-        let backRect = CGRect(
-            x: center.x - halfSize * 0.7 + offset3D,
-            y: center.y - halfSize * 0.7 - offset3D,
-            width: size * 0.7,
-            height: size * 0.7
-        )
-        
-        // Front face
-        let frontRect = CGRect(
-            x: center.x - halfSize,
-            y: center.y - halfSize,
-            width: size,
-            height: size
-        )
-        
-        // Draw back face
-        context.stroke(
-            Path(roundedRect: backRect, cornerRadius: 4),
-            with: .color(.cyan.opacity(0.5)),
-            lineWidth: 2.0
-        )
-        
-        // Draw front face
-        context.stroke(
-            Path(roundedRect: frontRect, cornerRadius: 4),
-            with: .color(.cyan),
-            lineWidth: 3.0
-        )
-        
-        // Connect corners
-        var connectingLines = Path()
-        // Top-left
-        connectingLines.move(to: CGPoint(x: frontRect.minX, y: frontRect.minY))
-        connectingLines.addLine(to: CGPoint(x: backRect.minX, y: backRect.minY))
-        // Top-right
-        connectingLines.move(to: CGPoint(x: frontRect.maxX, y: frontRect.minY))
-        connectingLines.addLine(to: CGPoint(x: backRect.maxX, y: backRect.minY))
-        // Bottom-left
-        connectingLines.move(to: CGPoint(x: frontRect.minX, y: frontRect.maxY))
-        connectingLines.addLine(to: CGPoint(x: backRect.minX, y: backRect.maxY))
-        // Bottom-right
-        connectingLines.move(to: CGPoint(x: frontRect.maxX, y: frontRect.maxY))
-        connectingLines.addLine(to: CGPoint(x: backRect.maxX, y: backRect.maxY))
-        
-        context.stroke(connectingLines, with: .color(.cyan.opacity(0.7)), lineWidth: 2.0)
-        
-        // Add a pulsing center dot
-        let centerDot = Path(ellipseIn: CGRect(
-            x: center.x - 3,
-            y: center.y - 3,
-            width: 6,
-            height: 6
-        ))
-        context.fill(centerDot, with: .color(.yellow))
-    }
-}
-
-private struct MapLandmarksOverlay: View {
-    let landmarks: [ProjectedLandmark]
-    let intrinsics: IntrinsicsSummary?
-    
-    var body: some View {
-        GeometryReader { geo in
-            let width = CGFloat(intrinsics?.width ?? 0)
-            let height = CGFloat(intrinsics?.height ?? 0)
-            
-            if width <= 0 || height <= 0 {
-                Color.clear
-            } else {
-                Canvas { context, size in
-                    for landmark in landmarks {
-                        // Convert pixel to screen coordinates
-                        let u = CGFloat(landmark.pixelX) / width
-                        let v = CGFloat(landmark.pixelY) / height
-                        let x = u * size.width
-                        let y = v * size.height
-                        
-                        // Color based on depth
-                        let color: Color
-                        if landmark.depth < 1.0 {
-                            color = .yellow  // Very close
-                        } else if landmark.depth < 3.0 {
-                            color = .green   // Medium distance
-                        } else {
-                            color = .blue    // Far
-                        }
-                        
-                        // Draw small dot for each landmark
-                        let dotSize: CGFloat = 3.0
-                        let dot = Path(ellipseIn: CGRect(
-                            x: x - dotSize / 2,
-                            y: y - dotSize / 2,
-                            width: dotSize,
-                            height: dotSize
-                        ))
-                        context.fill(dot, with: .color(color.opacity(0.7)))
-                    }
-                    
-                    // Draw count in top-right
-                    let countText = Text("\(landmarks.count) landmarks")
-                        .font(.system(size: 12, weight: .bold, design: .monospaced))
-                        .foregroundStyle(.green)
-                    
-                    context.draw(countText, at: CGPoint(x: size.width - 80, y: 20))
-                }
-            }
-        }
-    }
-}
+//private struct MapLandmarksOverlay: View {
+////    let landmarks: [ProjectedLandmark]
+//    let intrinsics: IntrinsicsSummary?
+//    
+//    var body: some View {
+//        GeometryReader { geo in
+//            let width = CGFloat(intrinsics?.width ?? 0)
+//            let height = CGFloat(intrinsics?.height ?? 0)
+//            
+//            if width <= 0 || height <= 0 {
+//                Color.clear
+//            } else {
+//                Canvas { context, size in
+//                    for landmark in landmarks {
+//                        // Convert pixel to screen coordinates
+//                        let u = CGFloat(landmark.pixelX) / width
+//                        let v = CGFloat(landmark.pixelY) / height
+//                        let x = u * size.width
+//                        let y = v * size.height
+//                        
+//                        // Color based on depth
+//                        let color: Color
+//                        if landmark.depth < 1.0 {
+//                            color = .yellow  // Very close
+//                        } else if landmark.depth < 3.0 {
+//                            color = .green   // Medium distance
+//                        } else {
+//                            color = .blue    // Far
+//                        }
+//                        
+//                        // Draw small dot for each landmark
+//                        let dotSize: CGFloat = 3.0
+//                        let dot = Path(ellipseIn: CGRect(
+//                            x: x - dotSize / 2,
+//                            y: y - dotSize / 2,
+//                            width: dotSize,
+//                            height: dotSize
+//                        ))
+//                        context.fill(dot, with: .color(color.opacity(0.7)))
+//                    }
+//                    
+//                    // Draw count in top-right
+//                    let countText = Text("\(landmarks.count) landmarks")
+//                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+//                        .foregroundStyle(.green)
+//                    
+//                    context.draw(countText, at: CGPoint(x: size.width - 80, y: 20))
+//                }
+//            }
+//        }
+//    }
+//}
 
 #Preview {
     ContentView()

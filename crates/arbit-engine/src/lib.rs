@@ -305,7 +305,7 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
                 self.tracking_state = TrackingState::TrackingPreInit;
             }
             TrackingState::TrackingPreInit => {
-                let is_key_frame = self.frame_index % 60 == 0;
+                let is_key_frame = self.frame_index % 10 == 0;
                 if !is_key_frame {
                     return;
                 }
