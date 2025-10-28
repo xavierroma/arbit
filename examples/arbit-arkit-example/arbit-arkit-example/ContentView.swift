@@ -14,13 +14,14 @@ import simd
 import Arbit
 
 private enum Milestone: Int, CaseIterable, Identifiable {
-    case pyramid = 1, tracking, twoView, vo, anchors
+    case pyramid = 1, intrinsics, tracking, twoView, vo, anchors
 
     var id: Int { rawValue }
 
     var label: String {
         switch self {
         case .pyramid: "Pyramid"
+        case .intrinsics: "Intrinsics"
         case .tracking: "Tracker"
         case .twoView: "Init"
         case .vo: "VO"
@@ -31,6 +32,7 @@ private enum Milestone: Int, CaseIterable, Identifiable {
     var headline: String {
         switch self {
         case .pyramid: "Pyramid"
+        case .intrinsics: "Intrinsics"
         case .tracking: "Tracker"
         case .twoView: "Init"
         case .vo: "VO"
@@ -43,7 +45,7 @@ struct ContentView: View {
     @StateObject private var cameraManager = CameraCaptureManager()
     @StateObject private var orientationProvider = DeviceOrientationProvider()
 
-    @State private var selectedMilestone: Milestone = .pyramid
+    @State private var selectedMilestone: Milestone = .intrinsics
     @State private var previousPipelineSeconds: Double?
     @State private var estimatedFPS: Double?
     @State private var backProjection: BackProjectionResult?
@@ -62,6 +64,11 @@ struct ContentView: View {
                     intrinsics: cameraManager.lastSample?.intrinsics
                 )
                 .allowsHitTesting(false)
+            }
+
+            if selectedMilestone == .intrinsics {
+                // Potential future overlay for intrinsics visualization (principal point, FOV crosshair, etc.)
+                Color.clear.allowsHitTesting(false)
             }
 
             VStack {
@@ -106,6 +113,8 @@ struct ContentView: View {
                 levels: cameraManager.pyramidLevels,
                 projection: backProjection
             )
+        case .intrinsics:
+            MilestoneIntrinsicsPanel(intrinsics: cameraManager.lastSample?.intrinsics)
         case .tracking:
             MilestoneFourPanel(trackedPoints: cameraManager.trackedPoints)
         case .twoView:
@@ -117,8 +126,8 @@ struct ContentView: View {
                 stats: cameraManager.mapStats,
                 anchors: cameraManager.anchorPoses,
                 lastPose: cameraManager.lastPoseMatrix,
-                statusMessage: cameraManager.mapStatusMessage,
-                )
+                statusMessage: cameraManager.mapStatusMessage
+            )
         }
     }
 
@@ -277,6 +286,48 @@ private struct PyramidLevelThumbnail: View {
         }
     }
 }
+private struct MilestoneIntrinsicsPanel: View {
+    let intrinsics: IntrinsicsSummary?
+
+    // Helper to format Double? safely
+    private func fmt(_ v: Double?) -> String {
+        guard let v else { return "—" }
+        return String(format: "%.3f", v)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Camera Intrinsics")
+                .font(.headline)
+
+            if let intr = intrinsics {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Resolution:")
+                    Text("  \(Int(intr.width)) x \(Int(intr.height)) px")
+
+                    Text("Focal Length (px):")
+                    Text("  fx = \(fmt(intr.fx))")
+                    Text("  fy = \(fmt(intr.fy))")
+
+                    Text("Principal Point (px):")
+                    Text("  cx = \(fmt(intr.cx))")
+                    Text("  cy = \(fmt(intr.cy))")
+                    
+                    Text("  skw = \(fmt(intr.skew))")
+
+                }
+                .font(.system(.footnote, design: .monospaced))
+            } else {
+                Text("Waiting for first frame / intrinsics…")
+                    .font(.system(.footnote, design: .monospaced))
+            }
+        }
+        .foregroundStyle(.white)
+        .padding()
+        .background(.black.opacity(0.58), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
 private struct MilestoneFourPanel: View {
     let trackedPoints: [TrackedPoint]
 
@@ -540,12 +591,12 @@ private struct TrackedPointsOverlay: View {
 //private struct MapLandmarksOverlay: View {
 ////    let landmarks: [ProjectedLandmark]
 //    let intrinsics: IntrinsicsSummary?
-//    
+//
 //    var body: some View {
 //        GeometryReader { geo in
 //            let width = CGFloat(intrinsics?.width ?? 0)
 //            let height = CGFloat(intrinsics?.height ?? 0)
-//            
+//
 //            if width <= 0 || height <= 0 {
 //                Color.clear
 //            } else {
@@ -556,7 +607,7 @@ private struct TrackedPointsOverlay: View {
 //                        let v = CGFloat(landmark.pixelY) / height
 //                        let x = u * size.width
 //                        let y = v * size.height
-//                        
+//
 //                        // Color based on depth
 //                        let color: Color
 //                        if landmark.depth < 1.0 {
@@ -566,7 +617,7 @@ private struct TrackedPointsOverlay: View {
 //                        } else {
 //                            color = .blue    // Far
 //                        }
-//                        
+//
 //                        // Draw small dot for each landmark
 //                        let dotSize: CGFloat = 3.0
 //                        let dot = Path(ellipseIn: CGRect(
@@ -577,12 +628,12 @@ private struct TrackedPointsOverlay: View {
 //                        ))
 //                        context.fill(dot, with: .color(color.opacity(0.7)))
 //                    }
-//                    
+//
 //                    // Draw count in top-right
 //                    let countText = Text("\(landmarks.count) landmarks")
 //                        .font(.system(size: 12, weight: .bold, design: .monospaced))
 //                        .foregroundStyle(.green)
-//                    
+//
 //                    context.draw(countText, at: CGPoint(x: size.width - 80, y: 20))
 //                }
 //            }

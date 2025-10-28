@@ -12,7 +12,6 @@ debug-server = [
     "dep:serde_json",
     "dep:image",
     "dep:lru",
-    "dep:tracing-subscriber",
     "dep:metrics",
     "dep:metrics-exporter-prometheus",
     "dep:mcap",
@@ -36,7 +35,7 @@ tower-http = { version = "0.6.6", features = ["cors", "trace", "timeout"], optio
 serde_json = { version = "1.0.145", optional = true }
 image = { version = "0.25.8", default-features = false, features = ["png", "jpeg"], optional = true }
 lru = { version = "0.16.1", optional = true }
-tracing-subscriber = { version = "0.3.20", features = ["env-filter"], optional = true }
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 metrics = { version = "0.24.2", optional = true }
 metrics-exporter-prometheus = { version = "0.17.2", optional = true }
 mcap = { version = "0.23.3", optional = true }
@@ -45,6 +44,11 @@ utoipa-swagger-ui = { version = "9.0.2", features = ["axum"], optional = true }
 ts-rs = { version = "11.0.1", optional = true }
 thiserror = "2.0.17"
 tower = { version = "0.5.2", optional = true, features = ["limit", "timeout", "util"] }
+imageproc = { version = "0.25.0", features = ["display-window"] }
+rerun = "0.26.2"
+ffmpeg-next = "8.0.0"
 
-[dev-dependencies]
-tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
+
+[[bin]]
+name = "arbit-engine-cli"
+path = "src/cli.rs"
