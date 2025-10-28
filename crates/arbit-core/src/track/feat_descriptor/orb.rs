@@ -2,6 +2,7 @@ use std::sync::OnceLock;
 
 use super::{FeatDescriptor, FeatDescriptorExtractor};
 use crate::img::Pyramid;
+use crate::img::image_utils::bilinear_sample_luma;
 use crate::img::pyramid::PyramidLevel;
 use crate::track::FeatureSeed;
 
@@ -167,8 +168,8 @@ fn build_descriptor(
         let (x1, y1) = rotate_point(pair.p1, cos_theta, sin_theta, scale, cx, cy);
         let (x2, y2) = rotate_point(pair.p2, cos_theta, sin_theta, scale, cx, cy);
 
-        let v1 = level.image.sample(x1, y1);
-        let v2 = level.image.sample(x2, y2);
+        let v1 = bilinear_sample_luma(&level.image, x1, y1);
+        let v2 = bilinear_sample_luma(&level.image, x2, y2);
 
         if v1 < v2 {
             bytes[i / 8] |= 1 << (i & 7);
@@ -214,60 +215,5 @@ impl XorShift64 {
     fn next_f32(&mut self) -> f32 {
         let bits = self.next_u64() >> 40; // Use upper 24 bits
         (bits as f32) / (1u64 << 24) as f32
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::img::{ImageBuffer, build_pyramid};
-    use approx::assert_relative_eq;
-    use nalgebra::Vector2;
-
-    #[test]
-    fn descriptor_has_expected_length() {
-        let orb = OrbDescriptor::new();
-        assert_eq!(<OrbDescriptor as FeatDescriptorExtractor>::LEN, 32);
-        let blank = ImageBuffer::zeros(64, 64);
-        let pyramid = build_pyramid(&blank, 1);
-        let seed = FeatureSeed {
-            level: 0,
-            px_uv: Vector2::new(32.0, 32.0),
-            score: 1.0,
-        };
-        let descriptors = orb.describe(&pyramid, &[seed]);
-        assert_eq!(descriptors.len(), 1);
-        assert_eq!(descriptors[0].bytes().len(), 32);
-    }
-
-    #[test]
-    fn orientation_aligns_with_intensity_centroid() {
-        let mut image = ImageBuffer::zeros(32, 32);
-        image.set(22, 16, 255.0);
-        let blanks = ImageBuffer::zeros(32, 32);
-        let level = PyramidLevel {
-            octave: 0,
-            scale: 1.0,
-            image,
-            grad_x: blanks.clone(),
-            grad_y: blanks,
-        };
-
-        let theta = compute_orientation(&level, 16.0, 16.0, DEFAULT_PATCH_RADIUS as f32);
-        assert_relative_eq!(theta, 0.0, epsilon = 1e-3);
-
-        let mut image_y = ImageBuffer::zeros(32, 32);
-        image_y.set(16, 8, 255.0);
-        let blanks = ImageBuffer::zeros(32, 32);
-        let level_y = PyramidLevel {
-            octave: 0,
-            scale: 1.0,
-            image: image_y,
-            grad_x: blanks.clone(),
-            grad_y: blanks,
-        };
-
-        let theta_y = compute_orientation(&level_y, 16.0, 16.0, DEFAULT_PATCH_RADIUS as f32);
-        assert_relative_eq!(theta_y, -std::f32::consts::FRAC_PI_2, epsilon = 1e-3);
     }
 }

@@ -2,7 +2,7 @@ use crate::db::{KeyframeDescriptor, KeyframeEntry, KeyframeIndex};
 use crate::math::se3::TransformSE3;
 use crc32fast::Hasher;
 use log::{info, warn};
-use nalgebra::{Matrix4, Point2, Point3, Translation3, UnitQuaternion, Vector2, Vector3};
+use nalgebra::{Matrix4, Point2, Point3, Translation3, UnitQuaternion, Vector3};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;

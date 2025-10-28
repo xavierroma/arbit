@@ -39,29 +39,29 @@ pub struct Track {
 
 #[derive(Debug, Clone)]
 pub struct TrackConfig {
-    pub nms_radius: f32,
-    pub grid_cell: f32,
-    pub per_cell_cap: usize,
+    pub _nms_radius: f32,
+    pub _grid_cell: f32,
+    pub _per_cell_cap: usize,
     pub r_detect: f32,
     pub r_promote: f32,
     pub fb_th: f32,
     pub res_th: f32,
     pub target_tracks: usize,
-    pub score_th: f32,
+    pub _score_th: f32,
 }
 
 impl Default for TrackConfig {
     fn default() -> Self {
         Self {
-            nms_radius: 6.0,
-            grid_cell: 32.0,
-            per_cell_cap: 3,
+            _nms_radius: 6.0,
+            _grid_cell: 32.0,
+            _per_cell_cap: 3,
             r_detect: 10.0,
             r_promote: 6.0,
             fb_th: 1.2,
             res_th: 1.0,
             target_tracks: 800,
-            score_th: 0.8,
+            _score_th: 0.8,
         }
     }
 }
@@ -303,7 +303,7 @@ impl<T: FlowTracker> TrackManager<T> {
     }
 }
 
-pub fn non_max_suppression(mut points: Vec<FeatureSeed>, radius: f32) -> Vec<FeatureSeed> {
+pub fn _non_max_suppression(mut points: Vec<FeatureSeed>, radius: f32) -> Vec<FeatureSeed> {
     if points.is_empty() {
         return points;
     }
@@ -325,7 +325,7 @@ pub fn non_max_suppression(mut points: Vec<FeatureSeed>, radius: f32) -> Vec<Fea
     result
 }
 
-pub fn grid_cap(points: Vec<FeatureSeed>, cell: f32, cap: usize) -> Vec<FeatureSeed> {
+pub fn _grid_cap(points: Vec<FeatureSeed>, cell: f32, cap: usize) -> Vec<FeatureSeed> {
     if cap == 0 {
         return Vec::new();
     }
@@ -363,7 +363,7 @@ pub fn drop_near_live(
         .collect()
 }
 
-pub fn apply_score_threshold(mut points: Vec<FeatureSeed>, percentile: f32) -> Vec<FeatureSeed> {
+pub fn _apply_score_threshold(mut points: Vec<FeatureSeed>, percentile: f32) -> Vec<FeatureSeed> {
     if points.is_empty() {
         return points;
     }

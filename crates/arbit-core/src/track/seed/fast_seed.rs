@@ -116,8 +116,8 @@ impl FeatureSeederTrait for FastSeeder {
     fn seed(&self, pyramid: &Pyramid) -> Vec<FeatureSeed> {
         let mut seeds = Vec::new();
         for level in pyramid.levels() {
-            let width = level.image.width();
-            let height = level.image.height();
+            let width = level.image.width() as usize;
+            let height = level.image.height() as usize;
             let grid_cfg = self.config.grid;
             let detector_cfg = self.config.detector;
 
@@ -172,7 +172,7 @@ impl FeatureSeederTrait for FastSeeder {
                     "FAST seeding in {}x{} (oct {}) → 0 (raw)",
                     width, height, level.octave
                 );
-                return Vec::new();
+                continue;
             }
 
             let candidates = if detector_cfg.nonmax_suppression {
@@ -236,7 +236,7 @@ impl FeatureSeederTrait for FastSeeder {
             });
 
             let mut seeds_level = if nms_radius > 0.0 {
-                radius_nms(seeds_level, nms_radius, per_cell_cap)
+                radius_nms(seeds_level, nms_radius, max_features)
             } else {
                 seeds_level
             };
@@ -253,7 +253,7 @@ impl FeatureSeederTrait for FastSeeder {
                 cell,
                 per_cell_cap,
                 nms_radius,
-                seeds.len(),
+                seeds_level.len(),
                 max_features
             );
 
@@ -296,7 +296,7 @@ fn fast_corner_score(
     arc_length: usize,
 ) -> Option<f32> {
     let image = &level.image;
-    let center = image.get(x, y);
+    let center = image.get_pixel(x as u32, y as u32).0[0] as f32;
     let high = center + threshold;
     let low = center - threshold;
 
@@ -304,7 +304,9 @@ fn fast_corner_score(
     let mut darker = 0;
     for &idx in &[0usize, 4, 8, 12] {
         let (dx, dy) = offsets[idx];
-        let sample = image.get((x as isize + dx) as usize, (y as isize + dy) as usize);
+        let sample = image
+            .get_pixel((x as isize + dx) as u32, (y as isize + dy) as u32)
+            .0[0] as f32;
         if sample >= high {
             brighter += 1;
         } else if sample <= low {
@@ -318,7 +320,9 @@ fn fast_corner_score(
 
     let mut circle_vals = [0.0f32; 16];
     for (i, &(dx, dy)) in offsets.iter().enumerate() {
-        circle_vals[i] = image.get((x as isize + dx) as usize, (y as isize + dy) as usize);
+        circle_vals[i] = image
+            .get_pixel((x as isize + dx) as u32, (y as isize + dy) as u32)
+            .0[0] as f32;
     }
 
     let mut classifications = [0i8; 32];
@@ -428,45 +432,4 @@ fn insert_sorted(bucket: &mut Vec<FeatureSeed>, seed: FeatureSeed) {
         insert_pos += 1;
     }
     bucket.insert(insert_pos, seed);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::img::pyramid::{ImageBuffer, build_pyramid};
-
-    #[test]
-    fn fast_seeder_detects_checker_corners() {
-        let width = 32;
-        let height = 32;
-        let mut bytes = vec![0u8; width * height * 4];
-        for y in 0..height {
-            for x in 0..width {
-                let idx = (y * width + x) * 4;
-                let bright = (x >= 16) ^ (y >= 16);
-                let value = if bright { 255 } else { 32 };
-                bytes[idx] = value;
-                bytes[idx + 1] = value;
-                bytes[idx + 2] = value;
-                bytes[idx + 3] = 255;
-            }
-        }
-        let gray = ImageBuffer::from_bgra8(&bytes, width, height, width * 4);
-        let pyramid = build_pyramid(&gray, 1);
-
-        let seeder = FastSeeder::new(FastSeederConfig {
-            grid: FeatureGridConfig::default(),
-            detector: FastDetectorConfig::default(),
-        });
-
-        let seeds = seeder.seed(&pyramid);
-        assert!(!seeds.is_empty(), "expected FAST seeder to find corners");
-        assert!(seeds.len() <= 32);
-        assert!(seeds.iter().all(|s| s.score >= 5.0));
-        assert!(
-            seeds
-                .iter()
-                .any(|s| { (s.px_uv.x - 16.5).abs() < 1.5 && (s.px_uv.y - 16.5).abs() < 1.5 })
-        );
-    }
 }

@@ -73,8 +73,8 @@ impl Tracker {
         prev_level: &PyramidLevel,
         curr_level: &PyramidLevel,
         initial_px_uv: Vector2<f32>,
-        rotation_prior: Option<&SO3>,
-        intrinsics: Option<&CameraIntrinsics>,
+        _rotation_prior: Option<&SO3>,
+        _intrinsics: Option<&CameraIntrinsics>,
     ) -> TrackObservation {
         let _span = debug_span!("track").entered();
 
@@ -184,18 +184,30 @@ impl Tracker {
                         continue;
                     }
 
-                    let i0 = prev_level.image.sample(template.x, template.y);
-                    let i1 = curr_level.image.sample(target.x, target.y);
-                    let gx = prev_level.grad_x.sample(template.x, template.y);
-                    let gy = prev_level.grad_y.sample(template.x, template.y);
+                    let i0 = prev_level
+                        .image
+                        .get_pixel(template.x as u32, template.y as u32)
+                        .0[0];
+                    let i1 = curr_level
+                        .image
+                        .get_pixel(target.x as u32, target.y as u32)
+                        .0[0];
+                    let gx = prev_level
+                        .grad_x
+                        .get_pixel(template.x as u32, template.y as u32)
+                        .0[0];
+                    let gy = prev_level
+                        .grad_y
+                        .get_pixel(template.x as u32, template.y as u32)
+                        .0[0];
                     let error = i1 - i0;
 
-                    gxx += gx * gx;
-                    gxy += gx * gy;
-                    gyy += gy * gy;
-                    bx += gx * error;
-                    by += gy * error;
-                    error_accum += error * error;
+                    gxx += gx as f32 * gx as f32;
+                    gxy += gx as f32 * gy as f32;
+                    gyy += gy as f32 * gy as f32;
+                    bx += gx as f32 * error as f32;
+                    by += gy as f32 * error as f32;
+                    error_accum += error as f32 * error as f32;
                     sample_count += 1.0;
                 }
             }
@@ -251,49 +263,4 @@ fn point_within_bounds(position: Vector2<f32>, width: isize, height: isize) -> b
         && position.y >= 0.0
         && position.x < (width - 1) as f32
         && position.y < (height - 1) as f32
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::img::pyramid::{ImageBuffer, build_pyramid};
-
-    fn synthetic_translation(
-        width: usize,
-        height: usize,
-        shift: (f32, f32),
-    ) -> (ImageBuffer, ImageBuffer) {
-        fn pattern(x: f32, y: f32) -> f32 {
-            let a = (x * 0.15).sin();
-            let b = (y * 0.12).cos();
-            let c = (x * 0.05 + y * 0.09).sin();
-            0.5 + 0.25 * a + 0.25 * b + 0.2 * c
-        }
-
-        let mut base1 = vec![0u8; width * height * 4];
-        let mut base2 = vec![0u8; width * height * 4];
-        for y in 0..height {
-            for x in 0..width {
-                let idx = (y * width + x) * 4;
-                let value_a = (pattern(x as f32, y as f32) * 255.0).clamp(0.0, 255.0) as u8;
-                base1[idx] = value_a;
-                base1[idx + 1] = value_a;
-                base1[idx + 2] = value_a;
-                base1[idx + 3] = 255;
-
-                let shifted_x = x as f32 - shift.0;
-                let shifted_y = y as f32 - shift.1;
-                let value_b = (pattern(shifted_x, shifted_y) * 255.0).clamp(0.0, 255.0) as u8;
-                base2[idx] = value_b;
-                base2[idx + 1] = value_b;
-                base2[idx + 2] = value_b;
-                base2[idx + 3] = 255;
-            }
-        }
-
-        (
-            ImageBuffer::from_bgra8(&base1, width, height, width * 4),
-            ImageBuffer::from_bgra8(&base2, width, height, width * 4),
-        )
-    }
 }

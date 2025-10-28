@@ -1,5 +1,5 @@
 use crate::ProcessingEngine;
-use arbit_core::track::{DescriptorBuffer, FeatDescriptorExtractor, FeatureSeederTrait};
+use arbit_core::track::{FeatDescriptorExtractor, FeatureSeederTrait};
 use nalgebra::Vector3;
 use serde::{Deserialize, Serialize};
 

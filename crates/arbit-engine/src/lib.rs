@@ -5,25 +5,20 @@ pub mod debug_server;
 
 mod track_manager;
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::error::Error;
+use std::collections::VecDeque;
+
 use std::sync::{Arc, Mutex};
 
 use arbit_core::db::KeyframeDescriptor;
-use arbit_core::img::{build_pyramid, ImageBuffer, Pyramid, PyramidLevel};
-use arbit_core::imu::{
-    AccelBiasEstimator, GravityEstimate, GravityEstimator, GyroBiasEstimator, ImuPreintegrator,
-    MotionDetector, MotionState, MotionStats, PreintegratedImu, PreintegrationConfig,
-};
+use arbit_core::img::{build_pyramid, GrayImage, Pyramid, RgbaImage};
+use arbit_core::imu::{GravityEstimate, GravityEstimator, PreintegratedImu};
 use arbit_core::init::two_view::{
     FeatureMatch, TwoViewInitialization, TwoViewInitializationParams, TwoViewInitializer,
 };
-use arbit_core::init::{compose_projection, triangulate};
-use arbit_core::map::{self, Anchor, KeyframeData, MapIoError, WorldMap};
+use arbit_core::map::{Anchor, WorldMap};
 use arbit_core::math::se3::TransformSE3;
 use arbit_core::math::CameraIntrinsics;
-use arbit_core::relocalize::{PnPObservation, PnPRansac, PnPRansacParams, PnPResult};
-use arbit_core::time::FrameTimestamps;
+use arbit_core::relocalize::{PnPRansac, PnPRansacParams};
 use arbit_core::track::{
     DescriptorBuffer, FastSeeder, FastSeederConfig, FeatDescriptor, FeatDescriptorExtractor,
     FeatureSeederTrait, HammingFeatMatcher, LucasKanadeConfig, OrbDescriptor, TrackObservation,
@@ -31,7 +26,7 @@ use arbit_core::track::{
 };
 use arbit_providers::CameraSample;
 use log::{debug, info, warn};
-use nalgebra::{Matrix3x4, Point3, Rotation3, Translation3, UnitQuaternion, Vector2, Vector3};
+use nalgebra::{Point3, Rotation3, Translation3, UnitQuaternion, Vector2, Vector3};
 use tracing::debug_span;
 
 use crate::track_manager::{drop_near_live, TrackConfig, TrackManager};
@@ -78,7 +73,7 @@ pub struct PyramidLevelCache {
     pub scale: f32,
     pub width: u32,
     pub height: u32,
-    pub bytes_per_row: usize,
+    pub bytes_per_row: u32,
     pub pixels: Vec<u8>,
 }
 
@@ -132,7 +127,7 @@ pub struct FrameData {
     pub timestamp_seconds: f64,
 
     // Visual data
-    pub image: ImageBuffer,
+    pub image: RgbaImage,
     pub pyramid: Pyramid,
     pub intrinsics: CameraIntrinsics,
 
@@ -172,7 +167,7 @@ pub struct ProcessingEngine<S: FeatureSeederTrait, D: FeatDescriptorExtractor> {
     track_manager: Mutex<TrackManager<Tracker>>,
     two_view_initializer: TwoViewInitializer,
     gravity_estimator: GravityEstimator,
-    pnp: PnPRansac,
+    _pnp: PnPRansac,
 }
 
 impl ProcessingEngine<FastSeeder, OrbDescriptor> {
@@ -214,7 +209,7 @@ impl ProcessingEngine<FastSeeder, OrbDescriptor> {
             gravity_estimator: GravityEstimator::new(0.75),
             map: WorldMap::new(),
             frame_index: 0,
-            pnp,
+            _pnp: pnp,
         };
 
         engine
@@ -252,19 +247,21 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
     /// 6. Pose estimation (initialization or PnP)
     pub fn ingest_camera_sample(&mut self, sample: &CameraSample) {
         // Step 2: Extract image buffer
-        let image = match self.extract_image_buffer(sample) {
-            Some(image) => image,
-            None => {
-                warn!(
-                    "Failed to extract image buffer for frame at {:.3}s",
-                    sample.timestamps.capture.as_duration().as_secs_f64()
-                );
-                return;
-            }
-        };
+        let image = RgbaImage::from_raw(
+            sample.intrinsics.width,
+            sample.intrinsics.height,
+            sample.data.to_vec(),
+        )
+        .unwrap();
+        let gray_image = GrayImage::from_raw(
+            image.width() as u32,
+            image.height() as u32,
+            image.clone().into_vec(),
+        )
+        .unwrap();
         let intrinsics = sample.intrinsics.clone();
         // Step 3: Build pyramid
-        let pyramid = self.step_build_pyramid(&image);
+        let pyramid = self.step_build_pyramid(&gray_image);
 
         let mut frame_data = FrameData {
             frame_index: self.frame_index,
@@ -375,10 +372,10 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
                     .map(|level| PyramidLevelCache {
                         octave: level.octave as u32,
                         scale: level.scale,
-                        width: level.image.width() as u32,
-                        height: level.image.height() as u32,
+                        width: level.image.width(),
+                        height: level.image.height(),
                         bytes_per_row: level.image.width(),
-                        pixels: self.encode_luma(level),
+                        pixels: level.image.clone().into_vec(),
                     })
                     .collect::<Vec<PyramidLevelCache>>()
             })
@@ -433,32 +430,8 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
         &self.pose_wc
     }
 
-    // ========================================================================
-    // INTERNAL HELPERS: Image Processing
-    // ========================================================================
-
-    fn extract_image_buffer(&self, sample: &CameraSample) -> Option<ImageBuffer> {
-        let width = sample.intrinsics.width as usize;
-        let height = sample.intrinsics.height as usize;
-        if width == 0 || height == 0 {
-            return None;
-        }
-
-        let min_required = width.saturating_mul(height).saturating_mul(4);
-        if sample.data.len() < min_required {
-            return None;
-        }
-
-        Some(ImageBuffer::from_bgra8(
-            sample.data.as_ref(),
-            width,
-            height,
-            sample.bytes_per_row,
-        ))
-    }
-
     /// Step 3: Build image pyramid for multi-scale feature tracking.
-    fn step_build_pyramid(&self, image: &ImageBuffer) -> Pyramid {
+    fn step_build_pyramid(&self, image: &GrayImage) -> Pyramid {
         let _span = debug_span!("step_build_pyramid").entered();
         let pyramid = build_pyramid(&image, self.config.pyramid_octaves);
         let levels = pyramid.levels().len();
@@ -617,7 +590,7 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
         }
 
         // Check if we found a valid initialization
-        let Some((two_view, prev_intrinsics)) = two_view_result else {
+        let Some((two_view, _prev_intrinsics)) = two_view_result else {
             debug!("No valid frame pair found for two-view initialization");
             return None;
         };
@@ -668,18 +641,9 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
 
         Some(rotated_two_view)
     }
-
-    fn encode_luma(&self, level: &PyramidLevel) -> Vec<u8> {
-        level
-            .image
-            .data()
-            .iter()
-            .map(|value| value.clamp(0.0, 255.0) as u8)
-            .collect()
-    }
 }
 
-fn update_pose(current: &TransformSE3, two_view: &TwoViewInitialization) -> TransformSE3 {
+fn _update_pose(current: &TransformSE3, two_view: &TwoViewInitialization) -> TransformSE3 {
     let rotation = UnitQuaternion::from_rotation_matrix(&two_view.rotation_c2c1);
     let translation = Translation3::from(two_view.translation_c2c1);
     let delta = TransformSE3::from_parts(translation, rotation);

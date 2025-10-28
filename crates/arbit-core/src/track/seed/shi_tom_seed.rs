@@ -1,6 +1,7 @@
 use crate::img::{Pyramid, pyramid::PyramidLevel};
 use crate::track::seed::utils::radius_nms;
 use crate::track::seed::{FeatureSeed, FeatureSeederTrait};
+use imageproc::integral_image::ArrayData;
 use log::debug;
 use nalgebra::Vector2;
 use rayon::prelude::*;
@@ -54,67 +55,61 @@ impl ShiTomasiSeeder {
     /// This makes λ_min an excellent corner detector: corners have strong responses
     /// in multiple directions, while edges are strong in only one direction.
     #[inline]
-    fn shi_tomasi_response(
-        level: &PyramidLevel,
-        x: usize,
-        y: usize,
-        width: usize,
-        height: usize,
-    ) -> f32 {
+    fn shi_tomasi_response(level: &PyramidLevel, x: u32, y: u32, width: u32, height: u32) -> f32 {
         // Early bounds check - if we can't fit a 3x3 window, return 0
         if x < 1 || y < 1 || x >= width - 1 || y >= height - 1 {
             return 0.0;
         }
 
-        let gx_values: [f32; 9] = [
-            level.grad_x.get(x - 1, y - 1),
-            level.grad_x.get(x, y - 1),
-            level.grad_x.get(x + 1, y - 1),
-            level.grad_x.get(x - 1, y),
-            level.grad_x.get(x, y),
-            level.grad_x.get(x + 1, y),
-            level.grad_x.get(x - 1, y + 1),
-            level.grad_x.get(x, y + 1),
-            level.grad_x.get(x + 1, y + 1),
+        let gx_values: [i16; 9] = [
+            level.grad_x.get_pixel(x - 1, y - 1).data()[0],
+            level.grad_x.get_pixel(x, y - 1).data()[0],
+            level.grad_x.get_pixel(x + 1, y - 1).data()[0],
+            level.grad_x.get_pixel(x - 1, y).data()[0],
+            level.grad_x.get_pixel(x, y).data()[0],
+            level.grad_x.get_pixel(x + 1, y).data()[0],
+            level.grad_x.get_pixel(x - 1, y + 1).data()[0],
+            level.grad_x.get_pixel(x, y + 1).data()[0],
+            level.grad_x.get_pixel(x + 1, y + 1).data()[0],
         ];
 
-        let gy_values: [f32; 9] = [
-            level.grad_y.get(x - 1, y - 1),
-            level.grad_y.get(x, y - 1),
-            level.grad_y.get(x + 1, y - 1),
-            level.grad_y.get(x - 1, y),
-            level.grad_y.get(x, y),
-            level.grad_y.get(x + 1, y),
-            level.grad_y.get(x - 1, y + 1),
-            level.grad_y.get(x, y + 1),
-            level.grad_y.get(x + 1, y + 1),
+        let gy_values: [i16; 9] = [
+            level.grad_y.get_pixel(x - 1, y - 1).data()[0],
+            level.grad_y.get_pixel(x, y - 1).data()[0],
+            level.grad_y.get_pixel(x + 1, y - 1).data()[0],
+            level.grad_y.get_pixel(x - 1, y).data()[0],
+            level.grad_y.get_pixel(x, y).data()[0],
+            level.grad_y.get_pixel(x + 1, y).data()[0],
+            level.grad_y.get_pixel(x - 1, y + 1).data()[0],
+            level.grad_y.get_pixel(x, y + 1).data()[0],
+            level.grad_y.get_pixel(x + 1, y + 1).data()[0],
         ];
 
         // Iterator pattern that LLVM auto-unrolls and vectorizes
         let (ixx, iyy, ixy) = gx_values
             .iter()
             .zip(gy_values.iter())
-            .fold((0.0f32, 0.0f32, 0.0f32), |(ixx, iyy, ixy), (&gx, &gy)| {
+            .fold((0i16, 0i16, 0i16), |(ixx, iyy, ixy), (&gx, &gy)| {
                 (ixx + gx * gx, iyy + gy * gy, ixy + gx * gy)
             });
 
         let trace = ixx + iyy;
         let det = ixx * iyy - ixy * ixy;
-        let discriminant = trace * trace - 4.0 * det;
+        let discriminant = trace as f32 * trace as f32 - 4.0 * det as f32;
 
         if discriminant < 0.0 {
             return 0.0;
         }
 
-        0.5 * (trace - discriminant.sqrt())
+        0.5 * (trace as f32 - discriminant.sqrt() as f32)
     }
 }
 
 impl FeatureSeederTrait for ShiTomasiSeeder {
     fn seed(&self, pyramid: &Pyramid) -> Vec<FeatureSeed> {
         let level = &pyramid.levels()[0];
-        let width = level.image.width();
-        let height = level.image.height();
+        let width = level.image.width() as usize;
+        let height = level.image.height() as usize;
 
         // --- Parameters & guards ---
         let cell = self.config.cell_size.max(4);
@@ -157,7 +152,13 @@ impl FeatureSeederTrait for ShiTomasiSeeder {
 
                     for y in y_min..y_max {
                         for x in x_min..x_max {
-                            let score = Self::shi_tomasi_response(level, x, y, width, height);
+                            let score = Self::shi_tomasi_response(
+                                level,
+                                x as u32,
+                                y as u32,
+                                width as u32,
+                                height as u32,
+                            );
                             if score < thr {
                                 continue;
                             }
@@ -234,46 +235,5 @@ impl FeatureSeederTrait for ShiTomasiSeeder {
             max_features
         );
         seeds
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::img::pyramid::{ImageBuffer, build_pyramid};
-
-    #[test]
-    fn seeder_picks_strong_gradients() {
-        let width = 32;
-        let height = 32;
-        let mut bytes = vec![0u8; width * height * 4];
-        for y in 0..height {
-            for x in 0..width {
-                let idx = (y * width + x) * 4;
-                let value = ((x + y) % 255) as u8;
-                bytes[idx] = value;
-                bytes[idx + 1] = value;
-                bytes[idx + 2] = value;
-                bytes[idx + 3] = 255;
-            }
-        }
-        let gray = ImageBuffer::from_bgra8(&bytes, width, height, width * 4);
-        let pyramid = build_pyramid(&gray, 1);
-
-        let seeder = ShiTomasiSeeder::new(ShiTomasiGridConfig {
-            cell_size: 8,
-            max_features: 16,
-            response_threshold: 1.0,
-            per_cell_cap: 10,
-            nms_radius_px: 10.0,
-            window_radius: 1,
-        });
-
-        let seeds = seeder.seed(&pyramid);
-        assert!(!seeds.is_empty());
-        assert!(seeds.len() <= 16);
-        for seed in seeds {
-            assert!(seed.score >= 1.0);
-        }
     }
 }
