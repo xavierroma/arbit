@@ -6,7 +6,7 @@ use std::sync::{
 
 use arbit_core::img::{Pyramid, PyramidLevel};
 use arbit_core::math::CameraIntrinsics;
-use arbit_core::track::{FeatureSeed, TrackObservation, TrackOutcome, Tracker};
+use arbit_core::track::{FeatureSeed, LKTracker, TrackObservation, TrackOutcome};
 use log::trace;
 use nalgebra::Vector2;
 
@@ -39,29 +39,19 @@ pub struct Track {
 
 #[derive(Debug, Clone)]
 pub struct TrackConfig {
-    pub _nms_radius: f32,
-    pub _grid_cell: f32,
-    pub _per_cell_cap: usize,
-    pub r_detect: f32,
     pub r_promote: f32,
     pub fb_th: f32,
     pub res_th: f32,
     pub target_tracks: usize,
-    pub _score_th: f32,
 }
 
 impl Default for TrackConfig {
     fn default() -> Self {
         Self {
-            _nms_radius: 6.0,
-            _grid_cell: 32.0,
-            _per_cell_cap: 3,
-            r_detect: 10.0,
             r_promote: 6.0,
             fb_th: 1.2,
             res_th: 1.0,
             target_tracks: 800,
-            _score_th: 0.8,
         }
     }
 }
@@ -89,12 +79,12 @@ pub trait FlowTracker: Send + Sync + 'static {
 pub struct TrackManager<T: FlowTracker> {
     pub tracks: HashMap<u64, Track>,
     pub next_id: AtomicU64,
-    pub tracker: Arc<T>,
+    pub tracker: T,
     pub config: TrackConfig,
 }
 
 impl<T: FlowTracker> TrackManager<T> {
-    pub fn new(tracker: Arc<T>, config: TrackConfig) -> Self {
+    pub fn new(tracker: T, config: TrackConfig) -> Self {
         Self {
             tracks: HashMap::new(),
             next_id: AtomicU64::new(1),
@@ -219,12 +209,50 @@ impl<T: FlowTracker> TrackManager<T> {
         self.alive_count() < self.config.target_tracks
     }
 
+    pub fn seed_tracks(
+        &mut self,
+        prev_frame_seeds: &Vec<FeatureSeed>,
+        prev_frame_id: u64,
+        curr_frame_id: u64,
+        prev_pyr: &Pyramid,
+        curr_pyr: &Pyramid,
+        intr: &CameraIntrinsics,
+    ) -> Vec<TrackObservation> {
+        let mut new_tracks = Vec::new();
+        for seed in prev_frame_seeds.iter() {
+            let mut obs = self.tracker.track(
+                &prev_pyr.levels()[seed.level],
+                &curr_pyr.levels()[seed.level],
+                seed.px_uv,
+                None,
+                intr,
+            );
+            if matches!(obs.outcome, TrackOutcome::Converged) {
+                let backward = self.tracker.track(
+                    &curr_pyr.levels()[seed.level],
+                    &prev_pyr.levels()[seed.level],
+                    obs.refined_px_uv,
+                    None,
+                    intr,
+                );
+                obs.fb_err = (backward.refined_px_uv - seed.px_uv).norm();
+            } else {
+                obs.fb_err = f32::MAX;
+            }
+            obs.score = seed.score;
+            obs.id = None;
+            new_tracks.push(obs);
+        }
+        self.promote(&mut new_tracks, prev_frame_id, curr_frame_id);
+        new_tracks
+    }
+
     pub fn promote(
         &mut self,
-        observations: &mut Vec<TrackObservation>,
+        observations: &Vec<TrackObservation>,
         frame_prev: u64,
         frame_curr: u64,
-    ) {
+    ) -> Vec<TrackObservation> {
         let mut accepted: Vec<(usize, f32)> = Vec::new();
         for (idx, obs) in observations.iter().enumerate() {
             if !matches!(obs.outcome, TrackOutcome::Converged) {
@@ -240,7 +268,7 @@ impl<T: FlowTracker> TrackManager<T> {
         }
 
         accepted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
+        let mut promoted = Vec::new();
         for (idx, score) in accepted {
             let Some(obs) = observations.get(idx).cloned() else {
                 continue;
@@ -259,28 +287,15 @@ impl<T: FlowTracker> TrackManager<T> {
             };
             trace!("Promoting track {} with score {:.3}", id, score);
             self.tracks.insert(id, track);
-            if let Some(entry) = observations.get_mut(idx) {
-                entry.id = Some(id);
-            }
+            let mut obs = obs.clone();
+            obs.id = Some(id);
+            promoted.push(obs);
         }
+        promoted
     }
 
     pub fn alive_count(&self) -> usize {
         self.tracks.values().filter(|t| t.alive).count()
-    }
-
-    pub fn live_points_at(&self, frame_id: u64) -> Vec<Vector2<f32>> {
-        self.tracks
-            .values()
-            .filter(|t| t.alive)
-            .filter_map(|t| {
-                t.obs
-                    .iter()
-                    .rev()
-                    .find(|obs| obs.frame_id == frame_id)
-                    .map(|obs| obs.px_uv)
-            })
-            .collect()
     }
 
     fn near_existing(&self, px_uv: &Vector2<f32>, frame_id: u64, radius: f32) -> bool {
@@ -303,87 +318,7 @@ impl<T: FlowTracker> TrackManager<T> {
     }
 }
 
-pub fn _non_max_suppression(mut points: Vec<FeatureSeed>, radius: f32) -> Vec<FeatureSeed> {
-    if points.is_empty() {
-        return points;
-    }
-    let mut result: Vec<FeatureSeed> = Vec::with_capacity(points.len());
-    points.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let radius_sq = radius * radius;
-    'outer: for candidate in points.into_iter() {
-        for existing in result.iter() {
-            if (existing.px_uv - candidate.px_uv).norm_squared() <= radius_sq {
-                continue 'outer;
-            }
-        }
-        result.push(candidate);
-    }
-    result
-}
-
-pub fn _grid_cap(points: Vec<FeatureSeed>, cell: f32, cap: usize) -> Vec<FeatureSeed> {
-    if cap == 0 {
-        return Vec::new();
-    }
-    let mut grid: HashMap<(i32, i32), usize> = HashMap::new();
-    let mut result = Vec::with_capacity(points.len());
-    for seed in points.into_iter() {
-        let key = (
-            (seed.px_uv.x / cell).floor() as i32,
-            (seed.px_uv.y / cell).floor() as i32,
-        );
-        let count = grid.entry(key).or_insert(0);
-        if *count < cap {
-            result.push(seed);
-            *count += 1;
-        }
-    }
-    result
-}
-
-pub fn drop_near_live(
-    points: Vec<FeatureSeed>,
-    live: Vec<Vector2<f32>>,
-    radius: f32,
-) -> Vec<FeatureSeed> {
-    if live.is_empty() {
-        return points;
-    }
-    let radius_sq = radius * radius;
-    points
-        .into_iter()
-        .filter(|seed| {
-            live.iter()
-                .all(|p| (p - seed.px_uv).norm_squared() > radius_sq)
-        })
-        .collect()
-}
-
-pub fn _apply_score_threshold(mut points: Vec<FeatureSeed>, percentile: f32) -> Vec<FeatureSeed> {
-    if points.is_empty() {
-        return points;
-    }
-    let percentile = percentile.clamp(0.0, 1.0);
-    if percentile <= 0.0 {
-        return points;
-    }
-    points.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let keep_fraction = (1.0 - percentile).max(0.0);
-    let keep_count = ((points.len() as f32) * keep_fraction).ceil() as usize;
-    let keep_count = keep_count.max(1).min(points.len());
-    points.truncate(keep_count);
-    points
-}
-
-impl FlowTracker for Tracker {
+impl FlowTracker for LKTracker {
     fn track(
         &self,
         prev: &PyramidLevel,
@@ -392,6 +327,6 @@ impl FlowTracker for Tracker {
         _prior: Option<Vector2<f32>>,
         intrinsics: &CameraIntrinsics,
     ) -> TrackObservation {
-        Tracker::track(self, prev, curr, seed, None, Some(intrinsics))
+        LKTracker::track(self, prev, curr, seed, None, Some(intrinsics))
     }
 }

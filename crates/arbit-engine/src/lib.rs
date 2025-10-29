@@ -21,15 +21,15 @@ use arbit_core::math::CameraIntrinsics;
 use arbit_core::relocalize::{PnPRansac, PnPRansacParams};
 use arbit_core::track::{
     DescriptorBuffer, FastSeeder, FastSeederConfig, FeatDescriptor, FeatDescriptorExtractor,
-    FeatureSeederTrait, HammingFeatMatcher, LucasKanadeConfig, OrbDescriptor, TrackObservation,
-    TrackOutcome, Tracker,
+    FeatureSeederTrait, HammingFeatMatcher, LKTracker, LucasKanadeConfig, OrbDescriptor,
+    TrackObservation, TrackOutcome,
 };
 use arbit_providers::CameraSample;
 use log::{debug, info, warn};
 use nalgebra::{Point3, Rotation3, Translation3, UnitQuaternion, Vector2, Vector3};
 use tracing::debug_span;
 
-use crate::track_manager::{drop_near_live, TrackConfig, TrackManager};
+use crate::track_manager::{TrackConfig, TrackManager};
 
 /// Processing constants grouped into a configuration structure.
 #[derive(Debug, Clone)]
@@ -163,8 +163,8 @@ pub struct ProcessingEngine<S: FeatureSeederTrait, D: FeatDescriptorExtractor> {
     feat_detector: S,
     feat_descriptor: D,
     feat_matcher: HammingFeatMatcher,
-    tracker: Arc<Tracker>,
-    track_manager: Mutex<TrackManager<Tracker>>,
+    tracker: Arc<LKTracker>,
+    track_manager: Mutex<TrackManager<LKTracker>>,
     two_view_initializer: TwoViewInitializer,
     gravity_estimator: GravityEstimator,
     _pnp: PnPRansac,
@@ -188,8 +188,11 @@ impl ProcessingEngine<FastSeeder, OrbDescriptor> {
             min_inliers: config.relocalization_min_inliers,
         });
 
-        let tracker = Arc::new(Tracker::new(LucasKanadeConfig::default()));
-        let track_manager = TrackManager::new(tracker.clone(), TrackConfig::default());
+        let tracker = Arc::new(LKTracker::new(LucasKanadeConfig::default()));
+        let track_manager = TrackManager::new(
+            LKTracker::new(LucasKanadeConfig::default()),
+            TrackConfig::default(),
+        );
 
         let engine = Self {
             config,
@@ -319,8 +322,8 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
                     self.tracking_state = TrackingState::Tracking;
                     //Dummy descriptor for now
                     let frame_descriptor = KeyframeDescriptor::from_slice(&[0.0; 5]);
-                    self.map
-                        .insert_keyframe(self.pose_wc, frame_descriptor, two_view.landmarks_c1);
+                    // self.map
+                    //     .insert_keyframe(self.pose_wc, frame_descriptor, two_view.landmarks_c1);
                 } else {
                     self.keyframe_window.push_front(keyframe_data);
                 }
@@ -470,52 +473,22 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
             return advanced;
         }
 
-        debug!("      [4] Detecting new candidates");
-
         // Step 4b: detect new candidates on the previous frame
-        let mut seeds = {
+        let seeds = {
             let _span = debug_span!("seed_features").entered();
             let raw = self.feat_detector.seed(prev_pyramid);
             debug!("      [4] Seeded ({} seeds)", raw.len());
             raw
         };
-
-        let live_prev = manager.live_points_at(frame_prev);
-        seeds = drop_near_live(seeds, live_prev, manager.config.r_detect);
-        debug!("      [4] Dropped near live: remaining {}", seeds.len());
-
-        // Step 5: track candidates forward and evaluate quality
-        let mut candidates: Vec<TrackObservation> = Vec::with_capacity(seeds.len());
-        for seed in seeds.iter() {
-            let mut observation = self.tracker.track(
-                &prev_pyramid.levels()[seed.level],
-                &curr_pyramid.levels()[seed.level],
-                seed.px_uv,
-                None,
-                Some(&intrinsics),
-            );
-
-            if matches!(observation.outcome, TrackOutcome::Converged) {
-                let backward = self.tracker.track(
-                    &curr_pyramid.levels()[seed.level],
-                    &prev_pyramid.levels()[seed.level],
-                    observation.refined_px_uv,
-                    None,
-                    Some(intrinsics),
-                );
-                observation.fb_err = (backward.refined_px_uv - seed.px_uv).norm();
-            } else {
-                observation.fb_err = f32::MAX;
-            }
-
-            observation.score = seed.score;
-            observation.id = None;
-            candidates.push(observation);
-        }
-
-        manager.promote(&mut candidates, frame_prev, frame_curr);
-
-        advanced.extend(candidates.into_iter().filter(|c| c.id.is_some()));
+        let new_tracks = manager.seed_tracks(
+            &seeds,
+            frame_prev,
+            frame_curr,
+            prev_pyramid,
+            curr_pyramid,
+            intrinsics,
+        );
+        advanced.extend(new_tracks);
         advanced
     }
 
@@ -559,14 +532,6 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
                     }
                 })
                 .collect();
-
-            if matches.len() < 8 {
-                debug!(
-                    "Insufficient matches ({}) for two-view initialization",
-                    matches.len()
-                );
-                continue;
-            }
 
             // Estimate essential matrix and decompose into R, t
             let two_view = {
@@ -624,11 +589,35 @@ impl<S: FeatureSeederTrait, D: FeatDescriptorExtractor> ProcessingEngine<S, D> {
 
         let frame_descriptor_a = KeyframeDescriptor::from_slice(&[0.0; 5]); // TODO: real descriptor
         let landmakrs_len = rotated_two_view.landmarks_c1.len();
-        self.map.insert_keyframe(
-            TransformSE3::identity(), // Camera 1 -> World (Identity since 1 = World)
-            frame_descriptor_a,
-            rotated_two_view.clone().landmarks_c1, // Landmarks in Camera 1 frame = World frame
-        );
+        // let features_with_colors: Vec<(Point2<f64>, Point3<f64>, [u8; 3])> = rotated_two_view
+        //     .landmarks_c1
+        //     .iter()
+        //     .zip(&matches)
+        //     .map(|(world_xyz, m)| {
+        //         // Get the pixel coordinates for the feature in frame A
+        //         let px_x = (m.norm_xy_a.x * K.fx + K.cx) as u32;
+        //         let px_y = (m.norm_xy_a.y * K.fy + K.cy) as u32;
+
+        //         // Sample the pixel color from the frame
+        //         let pixel = frame.img.get_pixel(
+        //             px_x.min(frame.img.width() - 1),
+        //             px_y.min(frame.img.height() - 1),
+        //         );
+        //         let color_rgb = [pixel[0], pixel[1], pixel[2]];
+
+        //         // Return (normalized_xy, world_xyz, color)
+        //         (
+        //             Point2::new(m.norm_xy_a.x, m.norm_xy_a.y),
+        //             *world_xyz,
+        //             color_rgb,
+        //         )
+        //     })
+        //     .collect();
+        // self.map.insert_keyframe(
+        //     TransformSE3::identity(), // Camera 1 -> World (Identity since 1 = World)
+        //     frame_descriptor_a,
+        //     features_with_colors, // Landmarks in Camera 1 frame = World frame
+        // );
 
         info!(
             target: "arbit_engine",
