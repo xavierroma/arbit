@@ -58,11 +58,11 @@ impl TrackObservation {
     }
 }
 
-pub struct Tracker {
+pub struct LKTracker {
     config: LucasKanadeConfig,
 }
 
-impl Tracker {
+impl LKTracker {
     pub fn new(config: LucasKanadeConfig) -> Self {
         Self { config }
     }

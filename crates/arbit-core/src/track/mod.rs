@@ -8,7 +8,7 @@ pub use feat_descriptor::{
 };
 pub use feat_matcher::{HammingFeatMatcher, Match};
 pub use health::{ForwardBackwardMetrics, TrackHealth};
-pub use lk::{LucasKanadeConfig, TrackObservation, TrackOutcome, Tracker};
+pub use lk::{LKTracker, LucasKanadeConfig, TrackObservation, TrackOutcome};
 pub use seed::{
     FastDetectorConfig, FastDetectorType, FastSeeder, FastSeederConfig, FeatureGridConfig,
     FeatureSeed, FeatureSeederTrait, ShiTomasiGridConfig, ShiTomasiSeeder,

@@ -134,7 +134,7 @@ fn compute_orientation(level: &PyramidLevel, cx: f32, cy: f32, radius: f32) -> f
     let mut m10 = 0.0f32;
     for dy in -radius..=radius {
         for dx in -radius..=radius {
-            let intensity = level.image.sample(cx + dx as f32, cy + dy as f32);
+            let intensity = bilinear_sample_luma(&level.image, cx + dx as f32, cy + dy as f32);
             m10 += dx as f32 * intensity;
             m01 += dy as f32 * intensity;
         }

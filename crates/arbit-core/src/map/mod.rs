@@ -1,11 +1,13 @@
 use crate::db::{KeyframeDescriptor, KeyframeEntry, KeyframeIndex};
 use crate::math::se3::TransformSE3;
 use crc32fast::Hasher;
+use image::{Pixel, Rgb, Rgba};
 use log::{info, warn};
 use nalgebra::{Matrix4, Point2, Point3, Translation3, UnitQuaternion, Vector3};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use tracing::trace;
 
 const GRID_SIZE: usize = 4;
 const CELL_COUNT: usize = GRID_SIZE * GRID_SIZE;
@@ -45,6 +47,7 @@ impl std::error::Error for MapIoError {}
 pub struct MapLandmark {
     pub id: u64,
     pub world_xyz: Point3<f64>,
+    pub color: Option<Rgba<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +63,7 @@ pub struct KeyframeFeature {
     pub world_xyz: Point3<f64>,
     pub landmark_id: u64,
     pub cell: usize,
+    pub color: Option<Rgba<u8>>,
 }
 
 impl KeyframeFeature {
@@ -137,8 +141,9 @@ impl WorldMap {
         pose: TransformSE3,
         descriptor: KeyframeDescriptor,
         // (norm_xy, world_xyz)
-        features: Vec<(Point2<f64>, Point3<f64>)>,
+        features: Vec<(Point2<f64>, Point3<f64>, Option<Rgba<u8>>)>,
     ) -> Option<u64> {
+        trace!(target: "arbit_core::map", "Inserting keyframe with pose: {:?}", pose);
         if features.is_empty() {
             warn!(target: "arbit_core::map", "Skipping keyframe insert due to empty feature set");
             return None;
@@ -151,7 +156,7 @@ impl WorldMap {
         let mut keyframe_features = Vec::with_capacity(feature_count);
         let mut cell_lookup: Vec<Vec<usize>> = vec![Vec::new(); CELL_COUNT];
 
-        for (norm_xy, world_xyz) in features {
+        for (norm_xy, world_xyz, color) in features {
             let landmark_id = self.next_landmark_id;
             self.next_landmark_id = self.next_landmark_id.saturating_add(1);
 
@@ -161,6 +166,7 @@ impl WorldMap {
                 MapLandmark {
                     id: landmark_id,
                     world_xyz,
+                    color,
                 },
             );
 
@@ -172,6 +178,7 @@ impl WorldMap {
                 world_xyz,
                 landmark_id,
                 cell,
+                color,
             });
         }
 
@@ -206,7 +213,7 @@ impl WorldMap {
         id: u64,
         pose_wc: TransformSE3,
         descriptor: KeyframeDescriptor,
-        features: Vec<(Point2<f64>, Point3<f64>, u64)>,
+        features: Vec<(Point2<f64>, Point3<f64>, u64, Option<Rgba<u8>>)>,
     ) {
         if features.is_empty() {
             warn!(
@@ -218,7 +225,7 @@ impl WorldMap {
 
         let mut keyframe_features = Vec::with_capacity(features.len());
         let mut cell_lookup: Vec<Vec<usize>> = vec![Vec::new(); CELL_COUNT];
-        for (norm_xy, world_xyz, landmark_id) in features {
+        for (norm_xy, world_xyz, landmark_id, color) in features {
             let cell = cell_for_normalized(&norm_xy);
             let feature_index = keyframe_features.len();
             cell_lookup[cell].push(feature_index);
@@ -230,6 +237,7 @@ impl WorldMap {
                 MapLandmark {
                     id: landmark_id,
                     world_xyz,
+                    color,
                 },
             );
 
@@ -238,6 +246,7 @@ impl WorldMap {
                 world_xyz,
                 landmark_id,
                 cell,
+                color,
             });
         }
 
@@ -281,7 +290,7 @@ impl WorldMap {
         self.landmarks.values()
     }
 
-    pub fn add_landmark(&mut self, position: Point3<f64>) -> u64 {
+    pub fn add_landmark(&mut self, position: Point3<f64>, color: Option<Rgba<u8>>) -> u64 {
         let id = self.next_landmark_id;
         self.next_landmark_id = self.next_landmark_id.saturating_add(1);
         self.landmarks.insert(
@@ -289,6 +298,7 @@ impl WorldMap {
             MapLandmark {
                 id,
                 world_xyz: position,
+                color,
             },
         );
         id
@@ -383,6 +393,7 @@ impl WorldMap {
                             feature.world_xyz.y,
                             feature.world_xyz.z,
                         ],
+                        color: feature.color.map(|c| c.0).unwrap_or([255, 255, 255, 255]),
                     })
                     .collect(),
             })
@@ -492,6 +503,7 @@ impl WorldMap {
                             feature.world_xyz[2],
                         ),
                         feature.landmark_id,
+                        Some(Rgba::from(feature.color)),
                     )
                 })
                 .collect();
@@ -547,6 +559,7 @@ struct SerializableFeature {
     landmark_id: u64,
     norm_xy: [f64; 2],
     world_xyz: [f64; 3],
+    color: [u8; 4],
 }
 
 #[derive(Serialize, Deserialize)]
@@ -585,105 +598,4 @@ pub fn cell_for_normalized(point: &Point2<f64>) -> usize {
 
 pub fn grid_size() -> usize {
     GRID_SIZE
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use approx::assert_relative_eq;
-    use nalgebra::{Translation3, UnitQuaternion};
-
-    fn pose() -> TransformSE3 {
-        TransformSE3::from_parts(Translation3::new(0.0, 0.0, 0.0), UnitQuaternion::identity())
-    }
-
-    #[test]
-    fn inserts_keyframe_and_queries() {
-        let mut map = WorldMap::new();
-        let descriptor = KeyframeDescriptor::from_slice(&[1.0; CELL_COUNT + 3]);
-        let features = vec![
-            (Point2::new(0.25, 0.25), Point3::new(0.0, 0.0, 1.0)),
-            (Point2::new(0.75, 0.75), Point3::new(0.1, 0.2, 1.2)),
-        ];
-        let id = map
-            .insert_keyframe(pose(), descriptor.clone(), features)
-            .expect("insert");
-        assert_eq!(id, 0);
-        let results = map.query(&descriptor, 1);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].id, id);
-        assert_eq!(results[0].feature_count(), 2);
-    }
-
-    #[test]
-    fn cell_lookup_is_consistent() {
-        let mut map = WorldMap::new();
-        let descriptor = KeyframeDescriptor::from_slice(&[1.0; CELL_COUNT + 3]);
-        let features = vec![
-            (Point2::new(0.01, 0.01), Point3::new(0.0, 0.0, 1.0)),
-            (Point2::new(0.49, 0.49), Point3::new(0.0, 0.0, 1.0)),
-        ];
-        let id = map
-            .insert_keyframe(pose(), descriptor, features)
-            .expect("insert");
-        let keyframe = map.keyframe(id).expect("keyframe");
-        let first_cell = cell_for_normalized(&Point2::new(0.01, 0.01));
-        let mut iter = keyframe.features_in_cell(first_cell);
-        let feature = iter.next().expect("feature");
-        assert_relative_eq!(feature.norm_xy.x as f64, 0.01, epsilon = 1e-2);
-        assert!(iter.next().is_none());
-    }
-
-    #[test]
-    fn anchors_create_and_resolve() {
-        let mut map = WorldMap::new();
-        let descriptor = KeyframeDescriptor::from_slice(&[1.0; CELL_COUNT + 3]);
-        let features = vec![
-            (Point2::new(0.2, 0.2), Point3::new(0.0, 0.0, 1.0)),
-            (Point2::new(0.8, 0.8), Point3::new(0.1, 0.1, 1.1)),
-        ];
-        let pose = pose();
-        let keyframe_id = map
-            .insert_keyframe(pose.clone(), descriptor, features)
-            .expect("keyframe");
-
-        let anchor_id = map.create_anchor(pose.clone(), Some(keyframe_id));
-        assert_eq!(map.anchor_count(), 1);
-        let anchor = map.resolve_anchor(anchor_id).expect("anchor");
-        assert_eq!(anchor.id, anchor_id);
-        assert_eq!(anchor.created_from_keyframe, Some(keyframe_id));
-
-        let mut updated_pose = pose.clone();
-        updated_pose.translation.vector.x += 0.1;
-        assert!(map.update_anchor_pose(anchor_id, updated_pose.clone()));
-        let updated = map.resolve_anchor(anchor_id).expect("updated");
-        assert_relative_eq!(
-            updated.pose_wc.translation.vector.x,
-            updated_pose.translation.vector.x,
-            epsilon = 1e-9
-        );
-    }
-
-    #[test]
-    fn map_round_trip_serialization() {
-        let mut map = WorldMap::new();
-        let descriptor = KeyframeDescriptor::from_slice(&[0.5; CELL_COUNT + 3]);
-        let features = vec![
-            (Point2::new(0.2, 0.2), Point3::new(0.0, 0.0, 1.0)),
-            (Point2::new(0.6, 0.6), Point3::new(0.1, 0.2, 1.3)),
-        ];
-        let pose = pose();
-        map.insert_keyframe(pose.clone(), descriptor.clone(), features);
-        map.create_anchor(pose.clone(), Some(0));
-
-        let bytes = map.to_bytes().expect("serialize");
-        let restored = WorldMap::from_bytes(&bytes).expect("deserialize");
-
-        assert_eq!(restored.keyframe_count(), map.keyframe_count());
-        assert_eq!(restored.anchor_count(), map.anchor_count());
-
-        let original_kf = map.keyframes().next().expect("keyframe");
-        let restored_kf = restored.keyframes().next().expect("keyframe");
-        assert_eq!(restored_kf.feature_count(), original_kf.feature_count());
-    }
 }

@@ -6,7 +6,10 @@ use crate::{
 use log::{debug, trace};
 use nalgebra::Vector2;
 
-const BASE_CIRCLE_OFFSETS: [(isize, isize); 16] = [
+/// Standard FAST detector samples a circle of 16 points at radius 3 pixels
+const FAST_CIRCLE_RADIUS: usize = 3;
+
+const FAST_CIRCLE_OFFSETS: [(isize, isize); 16] = [
     (0, -3),
     (1, -3),
     (2, -2),
@@ -48,16 +51,14 @@ pub struct FastDetectorConfig {
     pub intensity_threshold: f32,
     pub nonmax_suppression: bool,
     pub detector_type: FastDetectorType,
-    pub circle_radius: usize,
 }
 
 impl Default for FastDetectorConfig {
     fn default() -> Self {
         Self {
-            intensity_threshold: 20.0,
+            intensity_threshold: 1.0,
             nonmax_suppression: true,
             detector_type: FastDetectorType::Type9_16,
-            circle_radius: 3,
         }
     }
 }
@@ -80,7 +81,6 @@ impl Default for FastSeederConfig {
 #[derive(Debug, Clone)]
 pub struct FastSeeder {
     config: FastSeederConfig,
-    circle_offsets: [(isize, isize); 16],
     arc_length: usize,
 }
 
@@ -88,17 +88,12 @@ impl FastSeeder {
     pub fn new(config: FastSeederConfig) -> Self {
         let mut detector = config.detector;
         detector.intensity_threshold = detector.intensity_threshold.max(0.0);
-        detector.circle_radius = detector.circle_radius.max(2);
 
         let arc_length = detector.detector_type.contiguous_arc_length().min(16);
-        let circle_offsets = compute_circle_offsets(detector.circle_radius);
 
         trace!(
-            "FAST seeder config: threshold {:.1}, nonmax {}, radius {}, arc length {}",
-            detector.intensity_threshold,
-            detector.nonmax_suppression,
-            detector.circle_radius,
-            arc_length
+            "FAST seeder config: threshold {:.1}, nonmax {}, arc length {}",
+            detector.intensity_threshold, detector.nonmax_suppression, arc_length
         );
 
         Self {
@@ -106,7 +101,6 @@ impl FastSeeder {
                 grid: config.grid,
                 detector,
             },
-            circle_offsets,
             arc_length,
         }
     }
@@ -127,16 +121,16 @@ impl FeatureSeederTrait for FastSeeder {
             let response_threshold = grid_cfg.response_threshold.max(0.0);
             let nms_radius = grid_cfg.nms_radius_px.max(0.0);
             let lk_radius = grid_cfg.window_radius.max(1);
-            let circle_radius = detector_cfg.circle_radius.max(lk_radius);
+            let border_margin = FAST_CIRCLE_RADIUS.max(lk_radius);
 
-            if width <= circle_radius * 2 || height <= circle_radius * 2 {
+            if width <= border_margin * 2 || height <= border_margin * 2 {
                 return Vec::new();
             }
 
-            let x_lo = circle_radius;
-            let x_hi = width - circle_radius;
-            let y_lo = circle_radius;
-            let y_hi = height - circle_radius;
+            let x_lo = border_margin;
+            let x_hi = width - border_margin;
+            let y_lo = border_margin;
+            let y_hi = height - border_margin;
 
             let cells_x = ((x_hi - x_lo) + cell - 1) / cell;
             let cells_y = ((y_hi - y_lo) + cell - 1) / cell;
@@ -150,7 +144,7 @@ impl FeatureSeederTrait for FastSeeder {
                         level,
                         x,
                         y,
-                        &self.circle_offsets,
+                        &FAST_CIRCLE_OFFSETS,
                         detector_cfg.intensity_threshold,
                         self.arc_length,
                     ) {
@@ -269,22 +263,6 @@ struct Candidate {
     x: usize,
     y: usize,
     score: f32,
-}
-
-fn compute_circle_offsets(radius: usize) -> [(isize, isize); 16] {
-    if radius == 3 {
-        return BASE_CIRCLE_OFFSETS;
-    }
-
-    let scale = radius as f32 / 3.0;
-    let mut offsets = [(0isize, 0isize); 16];
-    for (i, &(x, y)) in BASE_CIRCLE_OFFSETS.iter().enumerate() {
-        offsets[i] = (
-            (x as f32 * scale).round() as isize,
-            (y as f32 * scale).round() as isize,
-        );
-    }
-    offsets
 }
 
 fn fast_corner_score(

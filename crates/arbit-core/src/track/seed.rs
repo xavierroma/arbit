@@ -25,8 +25,8 @@ impl Default for FeatureGridConfig {
             cell_size: 24,
             max_features: 1000,
             response_threshold: 10.0,
-            per_cell_cap: 5,
-            nms_radius_px: 10.0,
+            per_cell_cap: 100,
+            nms_radius_px: 16.0,
             window_radius: 10,
         }
     }

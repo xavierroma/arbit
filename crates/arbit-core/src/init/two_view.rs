@@ -27,7 +27,7 @@ impl Default for TwoViewInitializationParams {
             ransac_iterations: 200,
             ransac_threshold: 1e-3,
             ransac_sample_size: 8,
-            min_matches: 100,
+            min_matches: 10,
             min_parallax: 3.0,
         }
     }
@@ -191,19 +191,23 @@ impl TwoViewInitializer {
 
         let identity_projection =
             Matrix3x4::new(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
-        let candidate_projection =
+        let projection_c2c1 =
             compose_projection(&decomposition.rotation, &decomposition.translation);
 
         let mut landmarks = Vec::with_capacity(best_inliers.len());
 
         for &idx in &best_inliers {
-            if let Some(point) =
-                triangulate(&identity_projection, &candidate_projection, &matches[idx])
+            if let Some(point) = triangulate(&identity_projection, &projection_c2c1, &matches[idx])
             {
-                landmarks.push((
-                    Point2::new(matches[idx].norm_xy_a.x, matches[idx].norm_xy_a.y),
-                    point,
-                ));
+                let depth1 = point.z;
+                let cam2_point = decomposition.rotation * point.coords + decomposition.translation;
+                let depth2 = cam2_point.z;
+                if depth1 > 0.0 && depth2 > 0.0 {
+                    landmarks.push((
+                        Point2::new(matches[idx].norm_xy_a.x, matches[idx].norm_xy_a.y),
+                        point,
+                    ));
+                }
             }
         }
         if landmarks.len() < 50 {
