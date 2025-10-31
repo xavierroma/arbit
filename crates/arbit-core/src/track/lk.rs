@@ -15,7 +15,7 @@ impl Default for LucasKanadeConfig {
         Self {
             window_radius: 10,
             max_iterations: 30,
-            epsilon: 0.03162, // ε² ≈ 1e-3
+            epsilon: 0.01,
         }
     }
 }
@@ -138,6 +138,14 @@ impl LKTracker {
         result
     }
 
+    /// Refines the position of a feature from prev_level to curr_level using Lucas-Kanade.
+    ///
+    /// This implements the inverse compositional Lucas-Kanade algorithm:
+    /// 1. Extract template from prev_level centered at template_px_uv
+    /// 2. Iteratively refine guess to minimize photometric error between template and curr_level
+    /// 3. Solve a 2×2 linear system (Hessian) at each iteration to find the optical flow
+    ///
+    /// Returns (iterations, residual) on success, None if tracking fails.
     fn track_level(
         &self,
         prev_level: &PyramidLevel,
@@ -151,6 +159,7 @@ impl LKTracker {
         let curr_width = curr_level.image.width() as isize;
         let curr_height = curr_level.image.height() as isize;
 
+        // Early exit if tracking window doesn't fit in images
         if !window_within_bounds(template_px_uv, radius, prev_width, prev_height) {
             return None;
         }
@@ -160,78 +169,107 @@ impl LKTracker {
 
         let mut iterations = 0u32;
         let mut residual = 0.0f32;
-        let eps2 = self.config.epsilon * self.config.epsilon;
+        let convergence_threshold_sq = self.config.epsilon * self.config.epsilon;
 
+        // Gauss-Newton iterations to refine the guess
         while (iterations as usize) < self.config.max_iterations {
             iterations += 1;
-            let mut gxx = 0.0f32;
-            let mut gxy = 0.0f32;
-            let mut gyy = 0.0f32;
-            let mut bx = 0.0f32;
-            let mut by = 0.0f32;
-            let mut error_accum = 0.0f32;
+
+            // Accumulate Hessian (H) and steepest descent image (b)
+            // We're solving: H * delta = -b
+            let mut hessian_xx = 0.0f32;
+            let mut hessian_xy = 0.0f32;
+            let mut hessian_yy = 0.0f32;
+            let mut steepest_x = 0.0f32;
+            let mut steepest_y = 0.0f32;
+            let mut error_sum_sq = 0.0f32;
             let mut sample_count = 0.0f32;
 
+            // Loop over window around template position
             for dy in -radius..=radius {
                 for dx in -radius..=radius {
                     let offset = Vector2::new(dx as f32, dy as f32);
-                    let template = template_px_uv + offset;
-                    let target = *guess + offset;
+                    let template_pos = template_px_uv + offset;
+                    let target_pos = *guess + offset;
 
-                    if !point_within_bounds(template, prev_width, prev_height)
-                        || !point_within_bounds(target, curr_width, curr_height)
+                    // Skip pixels outside image bounds
+                    if !point_within_bounds(template_pos, prev_width, prev_height)
+                        || !point_within_bounds(target_pos, curr_width, curr_height)
                     {
                         continue;
                     }
 
-                    let i0 = prev_level
+                    // Sample intensities and gradients
+                    let intensity_prev = prev_level
                         .image
-                        .get_pixel(template.x as u32, template.y as u32)
+                        .get_pixel(template_pos.x as u32, template_pos.y as u32)
                         .0[0];
-                    let i1 = curr_level
+                    let intensity_curr = curr_level
                         .image
-                        .get_pixel(target.x as u32, target.y as u32)
+                        .get_pixel(target_pos.x as u32, target_pos.y as u32)
                         .0[0];
-                    let gx = prev_level
+                    let grad_x = prev_level
                         .grad_x
-                        .get_pixel(template.x as u32, template.y as u32)
+                        .get_pixel(template_pos.x as u32, template_pos.y as u32)
                         .0[0];
-                    let gy = prev_level
+                    let grad_y = prev_level
                         .grad_y
-                        .get_pixel(template.x as u32, template.y as u32)
+                        .get_pixel(template_pos.x as u32, template_pos.y as u32)
                         .0[0];
-                    let error = i1 - i0;
 
-                    gxx += gx as f32 * gx as f32;
-                    gxy += gx as f32 * gy as f32;
-                    gyy += gy as f32 * gy as f32;
-                    bx += gx as f32 * error as f32;
-                    by += gy as f32 * error as f32;
-                    error_accum += error as f32 * error as f32;
+                    // Photometric error: difference in intensities
+                    let photometric_error = intensity_curr - intensity_prev;
+
+                    // Accumulate Hessian: H = Σ(∇I * ∇I^T)
+                    let gx = grad_x as f32;
+                    let gy = grad_y as f32;
+                    hessian_xx += gx * gx;
+                    hessian_xy += gx * gy;
+                    hessian_yy += gy * gy;
+
+                    // Accumulate steepest descent: b = Σ(∇I * error)
+                    steepest_x += gx * photometric_error as f32;
+                    steepest_y += gy * photometric_error as f32;
+
+                    // Track error for residual calculation
+                    error_sum_sq += photometric_error as f32 * photometric_error as f32;
                     sample_count += 1.0;
                 }
             }
 
-            let lambda = 1e-4f32;
-            let gxx = gxx + lambda;
-            let gyy = gyy + lambda;
-            let det = gxx * gyy - gxy * gxy;
-            if det.abs() < 1e-6 {
+            // Regularize Hessian for numerical stability (Levenberg-Marquardt damping)
+            let damping = 1e-4f32;
+            hessian_xx += damping;
+            hessian_yy += damping;
+
+            // Invert 2×2 Hessian matrix
+            let determinant = hessian_xx * hessian_yy - hessian_xy * hessian_xy;
+            if determinant.abs() < 1e-6 {
+                // Matrix is singular, tracking fails
                 return None;
             }
 
-            let inv00 = gyy / det;
-            let inv01 = -gxy / det;
-            let inv11 = gxx / det;
+            let inv_det = 1.0 / determinant;
+            let h_inv_00 = hessian_yy * inv_det;
+            let h_inv_01 = -hessian_xy * inv_det;
+            let h_inv_11 = hessian_xx * inv_det;
 
-            let delta_x = -(inv00 * bx + inv01 * by);
-            let delta_y = -(inv01 * bx + inv11 * by);
+            // Solve for delta: delta = -H^(-1) * b
+            let delta_x = -(h_inv_00 * steepest_x + h_inv_01 * steepest_y);
+            let delta_y = -(h_inv_01 * steepest_x + h_inv_11 * steepest_y);
             let delta = Vector2::new(delta_x, delta_y);
+
+            // Update guess position
             *guess += delta;
 
-            if delta.dot(&delta) <= eps2 {
+            if !window_within_bounds(*guess, radius, curr_width, curr_height) {
+                return None;
+            }
+
+            // Check for convergence: if delta is small enough, we're done
+            if delta.norm_squared() <= convergence_threshold_sq {
                 residual = if sample_count > 0.0 {
-                    (error_accum / sample_count).sqrt()
+                    (error_sum_sq / sample_count).sqrt()
                 } else {
                     0.0
                 };
@@ -239,6 +277,7 @@ impl LKTracker {
             }
         }
 
+        // Max iterations reached without convergence
         Some((iterations, residual))
     }
 }
