@@ -3,6 +3,7 @@ use nalgebra::{Matrix3, Matrix3x4, Point2, Point3, Rotation3, SVector, Vector2, 
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use rand::seq::index::sample;
+use tracing::info;
 
 #[derive(Debug, Clone, Copy)]
 pub struct FeatureMatch {
@@ -62,13 +63,13 @@ impl TwoViewInitializer {
     }
 
     pub fn estimate(&self, matches: &[FeatureMatch]) -> Option<TwoViewInitialization> {
-        debug!(
+        info!(
             "Starting two-view initialization with {} feature matches",
             matches.len()
         );
 
         if matches.len() < self.params.min_matches {
-            debug!(
+            info!(
                 "Insufficient matches for two-view initialization: {} < {}",
                 matches.len(),
                 self.params.min_matches,
@@ -85,7 +86,7 @@ impl TwoViewInitializer {
                 || !m.norm_xy_b.x.is_finite()
                 || !m.norm_xy_b.y.is_finite()
             {
-                debug!("Match {} has non-finite coordinates, rejecting", i);
+                info!("Match {} has non-finite coordinates, rejecting", i);
                 return None;
             }
 
@@ -95,7 +96,7 @@ impl TwoViewInitializer {
             let norm_b = dir_b.norm();
 
             if norm_a <= f64::EPSILON || norm_b <= f64::EPSILON {
-                debug!("Match {} has near-zero direction norm, rejecting", i);
+                info!("Match {} has near-zero direction norm, rejecting", i);
                 return None;
             }
 
@@ -105,13 +106,13 @@ impl TwoViewInitializer {
         }
 
         if parallax_samples == 0 {
-            debug!("No valid matches available to evaluate parallax, rejecting");
+            info!("No valid matches available to evaluate parallax, rejecting");
             return None;
         }
 
         let average_parallax_deg = (parallax_sum / parallax_samples as f64).to_degrees();
         if average_parallax_deg < self.params.min_parallax {
-            debug!(
+            info!(
                 "Tracking not strong enough: average parallax {:.2}° < {:.2}°",
                 average_parallax_deg, self.params.min_parallax,
             );
@@ -125,18 +126,18 @@ impl TwoViewInitializer {
             matches.iter().map(|m| m.norm_xy_b.norm()).sum::<f64>() / matches.len() as f64;
 
         if spread_a < 1e-6 || spread_b < 1e-6 {
-            debug!(
+            info!(
                 "Matches have insufficient spread (a:{:.6}, b:{:.6}), rejecting",
                 spread_a, spread_b
             );
             return None;
         }
 
-        debug!("Input validation passed, proceeding with RANSAC");
+        info!("Input validation passed, proceeding with RANSAC");
 
         let mut rng = SmallRng::from_entropy();
         let mut best_inliers = Vec::new();
-        debug!(
+        info!(
             "Running {} RANSAC iterations",
             self.params.ransac_iterations
         );
@@ -159,7 +160,7 @@ impl TwoViewInitializer {
             let inliers = score_inliers(matches, &e_candidate, self.params.ransac_threshold);
             if inliers.len() > best_inliers.len() {
                 best_inliers = inliers;
-                debug!(
+                info!(
                     "RANSAC iteration {}: new best with {} inliers",
                     iter_count,
                     best_inliers.len()
@@ -168,7 +169,7 @@ impl TwoViewInitializer {
         }
 
         if best_inliers.len() < 8 {
-            debug!(
+            info!(
                 "No sufficient inliers found after RANSAC (best: {})",
                 best_inliers.len()
             );
@@ -176,7 +177,7 @@ impl TwoViewInitializer {
         }
 
         let inlier_matches: Vec<_> = best_inliers.iter().map(|&i| matches[i]).collect();
-        debug!(
+        info!(
             "Refining essential matrix with {} inliers",
             inlier_matches.len()
         );
@@ -210,17 +211,17 @@ impl TwoViewInitializer {
                 }
             }
         }
-        if landmarks.len() < 50 {
-            debug!(
+        if landmarks.len() < 10 {
+            info!(
                 "Two-view initialization failed: insufficient triangulations ({}/{})",
                 landmarks.len(),
                 best_inliers.len()
             );
             return None;
         }
-        debug!(
+        info!(
             "Two-view initialization successful: {} inliers, avg error: {:.6}",
-            inlier_matches.len(),
+            landmarks.len(),
             avg_error
         );
 
@@ -365,6 +366,7 @@ fn score_inliers(matches: &[FeatureMatch], essential: &Matrix3<f64>, threshold: 
     inliers
 }
 
+/// Sampson error is the distance of the projected point from the epipolar line.
 fn sampson_error(e: &Matrix3<f64>, match_pair: &FeatureMatch) -> f64 {
     let x1 = SVector::<f64, 3>::new(match_pair.norm_xy_a.x, match_pair.norm_xy_a.y, 1.0);
     let x2 = SVector::<f64, 3>::new(match_pair.norm_xy_b.x, match_pair.norm_xy_b.y, 1.0);
@@ -379,6 +381,22 @@ fn sampson_error(e: &Matrix3<f64>, match_pair: &FeatureMatch) -> f64 {
     (num_scalar * num_scalar / denom).abs()
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CandidateEvaluation {
+    rotation: Rotation3<f64>,
+    translation: Vector3<f64>,
+    positive_count: usize,
+    total_parallax: f64,
+    reprojection_error: f64,
+}
+
+/// Like the ORB_SLAM method
+/// 1. ecompose the essential matrix into four possible poses
+/// 2. For each pose, triangulate all features
+/// 3. Score the pose based on the number of positive points, the average parallax, and the reprojection error
+/// 4. Sort the poses by score
+/// 5. Check if the best pose is significantly better than the second best, if not return None
+/// 6. Return the best pose
 fn choose_pose(essential: &Matrix3<f64>, matches: &[FeatureMatch]) -> Option<DecomposedEssential> {
     let svd = nalgebra::SVD::new(*essential, true, true);
     let mut u = svd.u?;
@@ -399,36 +417,129 @@ fn choose_pose(essential: &Matrix3<f64>, matches: &[FeatureMatch]) -> Option<Dec
     let t = u.column(2).into_owned();
 
     let candidates = [(r1, t), (r1, -t), (r2, t), (r2, -t)];
-
     let p1 = Matrix3x4::new(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
 
-    let mut best = None;
-    let mut best_positive = 0usize;
+    let mut evaluations = Vec::new();
 
+    // Evaluate each candidate thoroughly
     for (rotation, t_vec) in candidates.iter() {
         let p2 = compose_projection(rotation, t_vec);
 
         let mut positive = 0usize;
+        let mut parallax_sum = 0.0;
+        let mut reproj_error_sum = 0.0;
+        let mut valid_points = 0usize;
+
         for m in matches {
             if let Some(point) = triangulate(&p1, &p2, m) {
                 let depth1 = point.z;
                 let cam2 = rotation * point.coords + t_vec;
-                if depth1 > 0.0 && cam2.z > 0.0 {
+                let depth2 = cam2.z;
+
+                if depth1 > 0.0 && depth2 > 0.0 {
                     positive += 1;
+
+                    // Compute parallax angle for this point
+                    let ray1 = Vector3::new(m.norm_xy_a.x, m.norm_xy_a.y, 1.0).normalize();
+                    let ray2 = Vector3::new(m.norm_xy_b.x, m.norm_xy_b.y, 1.0).normalize();
+                    let cos_parallax = ray1.dot(&ray2).clamp(-1.0, 1.0);
+                    parallax_sum += cos_parallax.acos();
+
+                    // Compute reprojection error
+                    let reproj1 = Vector2::new(point.x / point.z, point.y / point.z);
+                    let reproj2 = Vector2::new(cam2.x / cam2.z, cam2.y / cam2.z);
+                    let error1 = (m.norm_xy_a - reproj1).norm();
+                    let error2 = (m.norm_xy_b - reproj2).norm();
+                    reproj_error_sum += error1 + error2;
+
+                    valid_points += 1;
                 }
             }
         }
 
-        if positive > best_positive {
-            best_positive = positive;
-            best = Some(DecomposedEssential {
+        if valid_points > 0 {
+            evaluations.push(CandidateEvaluation {
                 rotation: *rotation,
-                translation: t_vec.normalize(),
+                translation: *t_vec,
+                positive_count: positive,
+                total_parallax: parallax_sum / valid_points as f64,
+                reprojection_error: reproj_error_sum / valid_points as f64,
             });
         }
     }
 
-    best
+    if evaluations.is_empty() {
+        info!("No valid candidate poses found");
+        return None;
+    }
+
+    // Sort by positive count (descending), then by reprojection error (ascending)
+    evaluations.sort_by(|a, b| {
+        b.positive_count.cmp(&a.positive_count).then_with(|| {
+            a.reprojection_error
+                .partial_cmp(&b.reprojection_error)
+                .unwrap()
+        })
+    });
+
+    let best = &evaluations[0];
+
+    // Check if the winner clearly dominates
+    let min_positive_ratio = 0.75; // Best must have 75%+ of inliers
+    let min_positive_count = (matches.len() as f64 * 0.5) as usize; // At least 50% of matches
+    let max_reproj_error = 0.01; // Normalized coordinates, so ~1% of image
+    let min_parallax_deg = 1.0; // Minimum average parallax in degrees
+
+    if best.positive_count < min_positive_count {
+        info!(
+            "Best candidate has insufficient positive points: {}/{}",
+            best.positive_count,
+            matches.len()
+        );
+        return None;
+    }
+
+    if best.reprojection_error > max_reproj_error {
+        info!(
+            "Best candidate has excessive reprojection error: {:.6}",
+            best.reprojection_error
+        );
+        return None;
+    }
+
+    if best.total_parallax.to_degrees() < min_parallax_deg {
+        info!(
+            "Best candidate has insufficient parallax: {:.2}°",
+            best.total_parallax.to_degrees()
+        );
+        return None;
+    }
+
+    // Check for ambiguity: second-best should be clearly worse
+    if evaluations.len() > 1 {
+        let second_best = &evaluations[1];
+        let ratio = best.positive_count as f64 / second_best.positive_count.max(1) as f64;
+
+        if ratio < 1.5 {
+            info!(
+                "Ambiguous reconstruction: best={} vs second={} (ratio={:.2})",
+                best.positive_count, second_best.positive_count, ratio
+            );
+            return None;
+        }
+    }
+
+    info!(
+        "Selected pose with {} positive points, {:.2}° parallax, {:.6} reproj error",
+        best.positive_count,
+        best.total_parallax.to_degrees(),
+        best.reprojection_error
+    );
+
+    Some(DecomposedEssential {
+        rotation: best.rotation,
+        translation: best.translation.normalize(),
+    })
 }
 
 pub fn compose_projection(rotation: &Rotation3<f64>, translation: &Vector3<f64>) -> Matrix3x4<f64> {
