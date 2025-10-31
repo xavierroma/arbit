@@ -11,14 +11,16 @@ use arbit_core::track::feat_descriptor::FeatDescriptorExtractor;
 use arbit_core::track::{
     FastDetectorConfig, FastSeeder, FastSeederConfig, FeatDescriptor, FeatureGridConfig,
     FeatureSeed, FeatureSeederTrait, HammingFeatMatcher, LKTracker, LucasKanadeConfig,
-    OrbDescriptor,
+    OrbDescriptor, TrackObservation, TrackOutcome,
 };
 use ffmpeg_next as ffmpeg;
-use imageproc::image::{self, imageops, ImageBuffer, Rgb, Rgba};
-use nalgebra::{Point2, Point3, Rotation3, Translation3, UnitQuaternion, Vector2};
+use imageproc::image::{self, imageops, ImageBuffer, Rgba};
+use nalgebra::{Matrix3, Point2, Point3, Rotation3, Translation3, UnitQuaternion, Vector2};
+use rerun::external::re_log_encoding::external::lz4_flex::frame;
+use rerun::Vec2D;
 use std::collections::VecDeque;
+use tracing::{info, info_span};
 use tracing_subscriber::{fmt, EnvFilter};
-
 const K: CameraIntrinsics = CameraIntrinsics {
     fx: 840.164,
     fy: 840.164,
@@ -49,9 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_level(true)
         .with_ansi(false)
         .with_span_events(fmt::format::FmtSpan::CLOSE)
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug")),
-        )
+        .with_env_filter(EnvFilter::new("info"))
         .init();
 
     // Initialize FFmpeg
@@ -65,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let video_path = if args.len() > 2 {
             args[2].clone()
         } else {
-            "src/data/vid.MOV".to_string()
+            "src/data/cup.MOV".to_string()
         };
 
         println!("\n📹 Processing video: {}", video_path);
@@ -85,10 +85,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         println!("\n📸 Processing image sequence");
         let paths = [
-            "src/data/office1.png",
-            "src/data/office2.png",
-            // "src/data/img3.png",
-            // "src/data/img4.png",
+            "src/data/cafe1.png",
+            "src/data/cafe2.png",
+            "src/data/cafe3.png",
+            "src/data/cafe4.png",
         ];
 
         paths
@@ -107,6 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for img in imgs.iter() {
         let img_resized = imageops::resize(img, WIDTH, HEIGHT, imageops::FilterType::Lanczos3);
         let img_rotated = imageops::rotate90(&img_resized);
+        info!("Tracking frame: {}", tracker.frame_window.len());
         let result = tracker.track(&img_rotated);
         match result {
             Ok(_) => (),
@@ -249,6 +250,7 @@ impl OrbPipeline {
         &self,
         img: &RgbaImage,
     ) -> (Vec<FeatureSeed>, Vec<FeatDescriptor<[u8; 32]>>, Pyramid) {
+        let _span = info_span!("process_image");
         let gray_image = image::imageops::grayscale(&image::DynamicImage::ImageRgba8(img.clone()));
         let pyramid = build_pyramid(&gray_image, self.pyramid_levels);
         let features = self.compute_fast_features(&gray_image, &pyramid);
@@ -275,8 +277,10 @@ struct FrameData {
     pub matches: Vec<FeatureMatch>,
     pub keyframe_id: Option<u64>,
     pub pyramid: Pyramid,
+    pub tracks: Vec<TrackObservation>,
 }
 
+#[derive(Debug)]
 enum TrackingState {
     Initial,
     Tracking,
@@ -292,8 +296,10 @@ struct Tracker {
     rec: rerun::RecordingStream,
     pnp: PnPRansac,
     pose_wc: TransformSE3,
+    pose_wc_traj: Vec<(TransformSE3, u64)>, //pose_wc, frame_id
     lk_tracker: LKTracker,
     flow_tracker: TrackManager<LKTracker>,
+    tracked_descriptors: Vec<(u64, FeatDescriptor<[u8; 32]>, Point3<f64>)>,
 }
 
 impl Tracker {
@@ -314,15 +320,18 @@ impl Tracker {
                 .unwrap(),
             pnp: PnPRansac::new(PnPRansacParams::default()),
             pose_wc: TransformSE3::identity(),
+            pose_wc_traj: Vec::new(),
             lk_tracker: LKTracker::new(LucasKanadeConfig::default()),
             flow_tracker: TrackManager::new(
                 LKTracker::new(LucasKanadeConfig::default()),
                 TrackConfig::default(),
             ),
+            tracked_descriptors: Vec::new(),
         }
     }
 
     pub fn track(&mut self, img: &RgbaImage) -> Result<(), Box<dyn std::error::Error>> {
+        let _span = info_span!("track");
         let (features, descriptors, pyramid) = self.pipeline.process_image(img);
         let mut frame_data = FrameData {
             frame_id: self.frame_window.len() as u64,
@@ -332,19 +341,27 @@ impl Tracker {
             matches: Vec::new(),
             keyframe_id: None,
             pyramid,
+            tracks: Vec::new(),
         };
 
-        if self.frame_window.len() < 2 {
+        if self.frame_window.len() < 1 {
             self.log_frame(&frame_data);
             self.frame_window.push_front(frame_data);
             return Ok(());
         }
+        info!(
+            "Tracking frameId: {}; state: {:?}",
+            frame_data.frame_id, self.tracking_state
+        );
         match self.tracking_state {
             TrackingState::Initial => {
+                let _span = info_span!("TrackingState::Initial");
                 for frame in self.frame_window.iter_mut() {
                     let matches = self
                         .matcher
-                        .match_feats(&frame.descriptors, &frame_data.descriptors)
+                        .match_feats(&frame.descriptors, &frame_data.descriptors);
+
+                    let feat_matches = matches
                         .iter()
                         .map(|m| {
                             let pt_a = &frame.descriptors[m.query_idx].seed.px_uv;
@@ -356,7 +373,7 @@ impl Tracker {
                             }
                         })
                         .collect::<Vec<_>>();
-                    let two_view_result = self.two_view_initializer.estimate(&matches);
+                    let two_view_result = self.two_view_initializer.estimate(&feat_matches);
                     if let Some(tv) = two_view_result {
                         let tv = tv.scaled(5.0);
                         // let rotated_two_view = scaled_two_view.rotate_world_orientation(
@@ -379,82 +396,215 @@ impl Tracker {
                             Point2<f64>,
                             Point3<f64>,
                             Option<Rgba<u8>>,
+                            FeatDescriptor<[u8; 32]>,
                         )> = tv
                             .landmarks_c1
                             .iter()
-                            .zip(&matches)
-                            .map(|((norm_xy_a, cam_xyz), m)| {
+                            .zip(feat_matches.iter().zip(matches.iter()))
+                            .map(|(landmark, (feat_match, m))| {
+                                let (norm_xy_a, cam_xyz) = landmark;
                                 // Get the pixel coordinates for the feature in frame A
-                                let px_x = (m.norm_xy_a.x * K.fx + K.cx) as u32;
-                                let px_y = (m.norm_xy_a.y * K.fy + K.cy) as u32;
+                                let px_x = (feat_match.norm_xy_a.x * K.fx + K.cx) as u32;
+                                let px_y = (feat_match.norm_xy_a.y * K.fy + K.cy) as u32;
 
                                 // Sample the pixel color from the frame
                                 let pixel = frame.img.get_pixel(
                                     px_x.min(frame.img.width() - 1),
                                     px_y.min(frame.img.height() - 1),
                                 );
+                                let descriptor = frame.descriptors[m.query_idx].clone();
 
-                                (*norm_xy_a, *cam_xyz, Some(*pixel))
+                                (*norm_xy_a, *cam_xyz, Some(*pixel), descriptor)
                             })
                             .collect::<Vec<_>>();
 
                         let cam_a_keyframe_id = self.map.insert_keyframe(
                             self.pose_wc,
                             frame_descriptor_a.clone(),
-                            features_with_colors, // c1 is world so no transformation needed
+                            features_with_colors.clone(), // c1 is world so no transformation needed
+                        );
+                        self.rec
+                            .log(
+                                "two_view/cam1",
+                                &rerun::Transform3D::from_mat3x3([
+                                    [1.0, 0.0, 0.0],
+                                    [0.0, 1.0, 0.0],
+                                    [0.0, 0.0, 1.0],
+                                ]),
+                            )
+                            .ok();
+                        self.rec
+                            .log(
+                                "two_view/cam1/image",
+                                &rerun::Image::from_image(frame.img.clone()).unwrap(),
+                            )
+                            .ok();
+
+                        let pose_c2c1 = pose_c1c2.inverse();
+
+                        self.rec
+                            .log(
+                                "two_view/cam2",
+                                &rerun::Transform3D::from_translation_rotation_scale(
+                                    rerun::Vec3D::new(
+                                        pose_c2c1.translation.vector.x as f32,
+                                        pose_c2c1.translation.vector.y as f32,
+                                        pose_c2c1.translation.vector.z as f32,
+                                    ),
+                                    rerun::Quaternion::from_xyzw([
+                                        pose_c2c1.rotation.i as f32,
+                                        pose_c2c1.rotation.j as f32,
+                                        pose_c2c1.rotation.k as f32,
+                                        pose_c2c1.rotation.w as f32,
+                                    ]),
+                                    1.0,
+                                ),
+                            )
+                            .ok();
+                        self.rec
+                            .log(
+                                "two_view/cam2/image",
+                                &rerun::Image::from_image(frame_data.img.clone()).unwrap(),
+                            )
+                            .ok();
+
+                        let points = features_with_colors
+                            .iter()
+                            .map(|(_, world_xyz, _, _)| {
+                                [world_xyz.x as f32, world_xyz.y as f32, world_xyz.z as f32]
+                            })
+                            .collect::<Vec<_>>();
+                        let colors = features_with_colors
+                            .iter()
+                            .map(|(_, _, color, _)| {
+                                if let Some(color) = color {
+                                    rerun::Color::from_rgb(color[0], color[1], color[2])
+                                } else {
+                                    rerun::Color::from_rgb(255, 0, 0)
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        self.rec
+                            .log(
+                                "map/landmarks",
+                                &rerun::Points3D::new(points).with_colors(colors.clone()),
+                            )
+                            .ok();
+                        self.rec
+                            .log(
+                                "map/landmarks/image",
+                                &rerun::Image::from_image(frame.img.clone()).unwrap(),
+                            )
+                            .ok();
+                        let points_2d = features_with_colors
+                            .iter()
+                            .map(|(_, _, _, d)| [d.seed.px_uv.x as f32, d.seed.px_uv.y as f32])
+                            .collect::<Vec<_>>();
+                        self.rec
+                            .log(
+                                "map/landmarks/image/descriptors",
+                                &rerun::Points2D::new(points_2d)
+                                    .with_radii([2.0])
+                                    .with_colors(colors),
+                            )
+                            .ok();
+
+                        let keyframe_data = self.map.keyframe(cam_a_keyframe_id.unwrap()).unwrap();
+
+                        self.tracked_descriptors.extend(
+                            keyframe_data
+                                .features()
+                                .iter()
+                                .map(|d| (d.landmark_id, d.descriptor.clone(), d.world_xyz)),
                         );
                         frame.keyframe_id = cam_a_keyframe_id;
                         frame_data.keyframe_id =
                             self.map
                                 .insert_keyframe(pose_c1c2, frame_descriptor_a.clone(), vec![]);
                         self.pose_wc = pose_c1c2;
+                        info!("Pose WC: {:?}", self.pose_wc);
+                        self.pose_wc_traj.push((self.pose_wc, frame_data.frame_id));
                         self.tracking_state = TrackingState::Tracking;
+                    } else {
+                        info!("Could not initiate two_view")
                     }
                 }
             }
             TrackingState::Tracking => {
-                let prev_frame = self.frame_window.front().unwrap();
-
-                let (stats, mut tracks) = self.flow_tracker.advance_alive(
-                    &prev_frame.pyramid,
-                    &frame_data.pyramid,
-                    &K,
-                    prev_frame.frame_id,
-                    frame_data.frame_id,
-                );
-
-                if self.flow_tracker.need_more_features() {
-                    let new_tracks = self.flow_tracker.seed_tracks(
-                        &prev_frame.features,
-                        prev_frame.frame_id,
-                        frame_data.frame_id,
-                        &prev_frame.pyramid,
-                        &frame_data.pyramid,
-                        &K,
-                    );
-                    tracks.extend(new_tracks);
-                }
-
-                // let pnp_observations = frame_data
-                //     .tracks
-                //     .iter()
-                //     .map(|t| PnPObservation {
-                //         world_point: ,
-                //         normalized_image: pos_px_to_normalized(
-                //             t.refined,
-                //             t.level_scale,
-                //             &frame_data.intrinsics,
-                //         ),
-                //     })
-                //     .collect::<Vec<_>>();
-                // let pnp_result = self.pnp.estimate(&pnp_observations);
-                // if let Some(pnp_result) = pnp_result {
-                //     // pose_cw from PnP
-                //     let pose_cw = pnp_result.pose_cw;
-                //     let pose_wc = pose_cw.inverse();
-                //     self.pose_wc = pose_wc;
-                //     self.trajectory.push(self.pose_wc.translation.vector);
+                let _span = info_span!("TrackingState::Tracking");
+                // let prev_frame = self.frame_window.front().unwrap();
+                // let (_stats, mut tracks) = self.flow_tracker.advance_alive(
+                //     &prev_frame.pyramid,
+                //     &frame_data.pyramid,
+                //     &K,
+                //     prev_frame.frame_id,
+                //     frame_data.frame_id,
+                // );
+                // // if self.flow_tracker.need_more_features() {
+                // let new_tracks = self.flow_tracker.seed_tracks(
+                //     &prev_frame.features,
+                //     prev_frame.frame_id,
+                //     frame_data.frame_id,
+                //     &prev_frame.pyramid,
+                //     &frame_data.pyramid,
+                //     &K,
+                // );
+                // tracks.extend(new_tracks);
                 // }
+                // frame_data.tracks = tracks;
+                let known_descriptors = self
+                    .tracked_descriptors
+                    .iter()
+                    .map(|(_, d, _)| d.clone())
+                    .collect::<Vec<_>>();
+                let feat_matches = self
+                    .matcher
+                    .match_feats(&known_descriptors, &frame_data.descriptors);
+
+                let pnp_observations = feat_matches
+                    .iter()
+                    .map(|t| PnPObservation {
+                        world_xyz: self.tracked_descriptors[t.query_idx].2,
+                        norm_xy: px_uv_to_norm_xy(
+                            frame_data.descriptors[t.train_idx].seed.px_uv.x,
+                            frame_data.descriptors[t.train_idx].seed.px_uv.y,
+                            &K,
+                        ),
+                    })
+                    .collect::<Vec<_>>();
+                let pnp_result = self.pnp.estimate(&pnp_observations);
+                if let Some(pnp_result) = pnp_result {
+                    self.pose_wc = pnp_result.pose_cw.inverse();
+                    info!("Pose WC: {:?}", self.pose_wc);
+                    self.pose_wc_traj.push((self.pose_wc, frame_data.frame_id));
+
+                    self.rec
+                        .log(
+                            format!("pnp/cam{}", frame_data.frame_id),
+                            &rerun::Transform3D::from_translation_rotation_scale(
+                                rerun::Vec3D::new(
+                                    pnp_result.pose_cw.translation.vector.x as f32,
+                                    pnp_result.pose_cw.translation.vector.y as f32,
+                                    pnp_result.pose_cw.translation.vector.z as f32,
+                                ),
+                                rerun::Quaternion::from_xyzw([
+                                    pnp_result.pose_cw.rotation.i as f32,
+                                    pnp_result.pose_cw.rotation.j as f32,
+                                    pnp_result.pose_cw.rotation.k as f32,
+                                    pnp_result.pose_cw.rotation.w as f32,
+                                ]),
+                                1.0,
+                            ),
+                        )
+                        .ok();
+                    self.rec
+                        .log(
+                            "two_view/cam2/image",
+                            &rerun::Image::from_image(frame_data.img.clone()).unwrap(),
+                        )
+                        .ok();
+                }
+                // if self.map.should_insert_keyframe(&self.pose_wc) {}
             }
             TrackingState::Lost => {}
         }
@@ -491,8 +641,9 @@ impl Tracker {
             .ok();
 
         // 3. Log camera pose (extrinsics)
-        let translation = self.pose_wc.translation.vector;
-        let rotation = self.pose_wc.rotation;
+        let pose_cw = self.pose_wc.inverse();
+        let translation = pose_cw.translation.vector;
+        let rotation = pose_cw.rotation;
 
         self.rec
             .log(
@@ -527,6 +678,25 @@ impl Tracker {
                     &rerun::Points2D::new(points_2d)
                         .with_radii([2.0])
                         .with_colors([rerun::Color::from_rgb(34, 138, 167)]),
+                )
+                .ok();
+
+            let points_2d: Vec<[f32; 2]> = frame_data
+                .descriptors
+                .iter()
+                .map(|d| [d.seed.px_uv.x, d.seed.px_uv.y])
+                .collect();
+            let desc_colors: Vec<rerun::Color> = frame_data
+                .descriptors
+                .iter()
+                .map(|d| rerun::Color::from_rgb(255, 0, 0))
+                .collect();
+            self.rec
+                .log(
+                    "world/camera/image/descriptors",
+                    &rerun::Points2D::new(points_2d)
+                        .with_radii([2.0])
+                        .with_colors([rerun::Color::from_rgb(255, 0, 0)]),
                 )
                 .ok();
         }
@@ -595,124 +765,5 @@ impl Tracker {
                 )
                 .ok();
         }
-
-        if self.map.landmark_count() > 0 && !frame_data.features.is_empty() {
-            // Get camera center in world coordinates
-            // pose_wc is camera-to-world, so translation gives camera position directly
-            let camera_center_world = self.pose_wc.translation.vector;
-
-            // For each keyframe feature, draw a line to its corresponding 3D landmark
-            if let Some(keyframe_id) = frame_data.keyframe_id {
-                if let Some(keyframe) = self.map.keyframe(keyframe_id) {
-                    let observation_lines: Vec<Vec<[f32; 3]>> = keyframe
-                        .features()
-                        .iter()
-                        .map(|feat| {
-                            vec![
-                                // Start: 3D landmark position
-                                [
-                                    feat.world_xyz.x as f32,
-                                    feat.world_xyz.y as f32,
-                                    feat.world_xyz.z as f32,
-                                ],
-                                // End: camera center
-                                [
-                                    camera_center_world.x as f32,
-                                    camera_center_world.y as f32,
-                                    camera_center_world.z as f32,
-                                ],
-                            ]
-                        })
-                        .collect();
-
-                    if !observation_lines.is_empty() {
-                        self.rec
-                            .log(
-                                "world/observations",
-                                &rerun::LineStrips3D::new(observation_lines)
-                                    .with_colors([rerun::Color::from_rgb(100, 200, 255)])
-                                    .with_radii([1.0]),
-                            )
-                            .ok();
-                    }
-                }
-            }
-        }
-
-        // 7. Log all keyframe poses in the map
-        if self.map.keyframe_count() > 0 {
-            for keyframe in self.map.keyframes() {
-                // keyframe.pose is camera-to-world (pose of camera in world frame)
-                let kf_trans = keyframe.pose.translation.vector;
-                let kf_rot = keyframe.pose.rotation;
-
-                self.rec
-                    .log(
-                        format!("world/keyframes/{}", keyframe.id),
-                        &rerun::Transform3D::from_translation_rotation(
-                            rerun::Vec3D::new(
-                                kf_trans.x as f32,
-                                kf_trans.y as f32,
-                                kf_trans.z as f32,
-                            ),
-                            rerun::Quaternion::from_xyzw([
-                                kf_rot.i as f32,
-                                kf_rot.j as f32,
-                                kf_rot.k as f32,
-                                kf_rot.w as f32,
-                            ]),
-                        ),
-                    )
-                    .ok();
-
-                // Optionally: log a small coordinate frame at each keyframe
-                self.rec
-                    .log(
-                        format!("world/keyframes/{}", keyframe.id),
-                        &rerun::Boxes3D::from_half_sizes([[0.05, 0.05, 0.05]])
-                            .with_colors([rerun::Color::from_rgb(255, 0, 0)]),
-                    )
-                    .ok();
-            }
-        }
-
-        // 8. Optional: Log tracking state
-        let state_text = match self.tracking_state {
-            TrackingState::Initial => "Initial",
-            TrackingState::Tracking => "Tracking",
-            TrackingState::Lost => "Lost",
-        };
-
-        self.rec
-            .log(
-                "tracking_state",
-                &rerun::TextLog::new(state_text).with_level(match self.tracking_state {
-                    TrackingState::Tracking => rerun::TextLogLevel::INFO,
-                    TrackingState::Initial => rerun::TextLogLevel::WARN,
-                    TrackingState::Lost => rerun::TextLogLevel::ERROR,
-                }),
-            )
-            .ok();
-
-        // self.rec
-        //     .log(
-        //         "stats/landmark_count",
-        //         &rerun::Scalar::new(self.map.landmark_count() as f64),
-        //     )
-        //     .ok();
-
-        // self.rec
-        //     .log(
-        //         "stats/keyframe_count",
-        //         &rerun::Scalar::new(self.map.keyframe_count() as f64),
-        //     )
-        //     .ok();
-
-        // self.rec
-        //     .log(
-        //         "stats/feature_count",
-        //         &rerun::Scalar::new(frame_data.features.len() as f64),
-        //     )
-        //     .ok();
     }
 }

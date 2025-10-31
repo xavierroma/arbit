@@ -7,8 +7,8 @@ use std::sync::{
 use arbit_core::img::{Pyramid, PyramidLevel};
 use arbit_core::math::CameraIntrinsics;
 use arbit_core::track::{FeatureSeed, LKTracker, TrackObservation, TrackOutcome};
-use log::trace;
 use nalgebra::Vector2;
+use tracing::info;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Observation {
@@ -48,9 +48,9 @@ pub struct TrackConfig {
 impl Default for TrackConfig {
     fn default() -> Self {
         Self {
-            r_promote: 6.0,
-            fb_th: 1.2,
-            res_th: 1.0,
+            r_promote: 4.0,
+            fb_th: 5.0,
+            res_th: 10.0,
             target_tracks: 800,
         }
     }
@@ -131,10 +131,9 @@ impl<T: FlowTracker> TrackManager<T> {
                 track.alive = false;
                 stats.killed += 1;
                 stats.no_converge += 1;
-                trace!(
+                info!(
                     "Track {} killed: forward tracking did not converge (outcome: {:?})",
-                    track.id,
-                    forward.outcome
+                    track.id, forward.outcome
                 );
                 continue;
             }
@@ -150,10 +149,9 @@ impl<T: FlowTracker> TrackManager<T> {
                 track.alive = false;
                 stats.killed += 1;
                 stats.fb_fail += 1;
-                trace!(
+                info!(
                     "Track {} killed: backward tracking did not converge (outcome: {:?})",
-                    track.id,
-                    back.outcome
+                    track.id, back.outcome
                 );
                 continue;
             }
@@ -163,11 +161,9 @@ impl<T: FlowTracker> TrackManager<T> {
                 track.alive = false;
                 stats.killed += 1;
                 stats.fb_fail += 1;
-                trace!(
+                info!(
                     "Track {} killed: FB error {:.2}px > threshold {:.2}px",
-                    track.id,
-                    fb_err,
-                    self.config.fb_th
+                    track.id, fb_err, self.config.fb_th
                 );
                 continue;
             }
@@ -176,11 +172,9 @@ impl<T: FlowTracker> TrackManager<T> {
                 track.alive = false;
                 stats.killed += 1;
                 stats.res_fail += 1;
-                trace!(
+                info!(
                     "Track {} killed: residual {:.3} > threshold {:.3}",
-                    track.id,
-                    forward.residual,
-                    self.config.res_th
+                    track.id, forward.residual, self.config.res_th
                 );
                 continue;
             }
@@ -221,30 +215,47 @@ impl<T: FlowTracker> TrackManager<T> {
         let mut new_tracks = Vec::new();
         for seed in prev_frame_seeds.iter() {
             let mut obs = self.tracker.track(
-                &prev_pyr.levels()[seed.level],
-                &curr_pyr.levels()[seed.level],
+                &prev_pyr
+                    .levels()
+                    .iter()
+                    .find(|l| l.scale == seed.level_scale)
+                    .unwrap(),
+                &curr_pyr
+                    .levels()
+                    .iter()
+                    .find(|l| l.scale == seed.level_scale)
+                    .unwrap(),
                 seed.px_uv,
                 None,
                 intr,
             );
             if matches!(obs.outcome, TrackOutcome::Converged) {
                 let backward = self.tracker.track(
-                    &curr_pyr.levels()[seed.level],
-                    &prev_pyr.levels()[seed.level],
+                    &curr_pyr
+                        .levels()
+                        .iter()
+                        .find(|l| l.scale == seed.level_scale)
+                        .unwrap(),
+                    &prev_pyr
+                        .levels()
+                        .iter()
+                        .find(|l| l.scale == seed.level_scale)
+                        .unwrap(),
                     obs.refined_px_uv,
                     None,
                     intr,
                 );
                 obs.fb_err = (backward.refined_px_uv - seed.px_uv).norm();
+                info!("Tracking for seed: {:?}; Forward obs: {:?}; Backward obs: {:?}; FB error: {:.2}px", seed, obs, backward, obs.fb_err);
             } else {
+                info!("Forward tracking did not converge for seed: {:?}", seed);
                 obs.fb_err = f32::MAX;
             }
             obs.score = seed.score;
             obs.id = None;
             new_tracks.push(obs);
         }
-        self.promote(&mut new_tracks, prev_frame_id, curr_frame_id);
-        new_tracks
+        self.promote(&new_tracks, prev_frame_id, curr_frame_id)
     }
 
     pub fn promote(
@@ -256,12 +267,23 @@ impl<T: FlowTracker> TrackManager<T> {
         let mut accepted: Vec<(usize, f32)> = Vec::new();
         for (idx, obs) in observations.iter().enumerate() {
             if !matches!(obs.outcome, TrackOutcome::Converged) {
+                info!(
+                    "Track {} not promoted: tracking did not converge",
+                    obs.id.unwrap_or(0)
+                );
                 continue;
             }
             if obs.fb_err > self.config.fb_th || obs.residual > self.config.res_th {
+                info!("Track {} not promoted: FB error {:.2}px > threshold {:.2}px or residual {:.3} > threshold {:.3}",
+                    obs.id.unwrap_or(0), obs.fb_err, self.config.fb_th, obs.residual, self.config.res_th
+                );
                 continue;
             }
             if self.near_existing(&obs.refined_px_uv, frame_curr, self.config.r_promote) {
+                info!(
+                    "Track {} not promoted: near existing track",
+                    obs.id.unwrap_or(0)
+                );
                 continue;
             }
             accepted.push((idx, obs.score));
@@ -285,7 +307,7 @@ impl<T: FlowTracker> TrackManager<T> {
                 age: 1,
                 score,
             };
-            trace!("Promoting track {} with score {:.3}", id, score);
+            info!("Promoting track {} with score {:.3}", id, score);
             self.tracks.insert(id, track);
             let mut obs = obs.clone();
             obs.id = Some(id);

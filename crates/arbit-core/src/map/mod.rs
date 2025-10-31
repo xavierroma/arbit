@@ -1,5 +1,6 @@
 use crate::db::{KeyframeDescriptor, KeyframeEntry, KeyframeIndex};
 use crate::math::se3::TransformSE3;
+use crate::track::feat_descriptor::FeatDescriptor;
 use crc32fast::Hasher;
 use image::{Pixel, Rgb, Rgba};
 use log::{info, warn};
@@ -64,6 +65,7 @@ pub struct KeyframeFeature {
     pub landmark_id: u64,
     pub cell: usize,
     pub color: Option<Rgba<u8>>,
+    pub descriptor: FeatDescriptor<[u8; 32]>,
 }
 
 impl KeyframeFeature {
@@ -76,7 +78,6 @@ impl KeyframeFeature {
 pub struct KeyframeData {
     pub id: u64,
     pub pose: TransformSE3,
-    pub descriptor: KeyframeDescriptor,
     features: Vec<KeyframeFeature>,
     cell_lookup: Vec<Vec<usize>>,
 }
@@ -141,7 +142,12 @@ impl WorldMap {
         pose: TransformSE3,
         descriptor: KeyframeDescriptor,
         // (norm_xy, world_xyz)
-        features: Vec<(Point2<f64>, Point3<f64>, Option<Rgba<u8>>)>,
+        features: Vec<(
+            Point2<f64>,
+            Point3<f64>,
+            Option<Rgba<u8>>,
+            FeatDescriptor<[u8; 32]>,
+        )>,
     ) -> Option<u64> {
         trace!(target: "arbit_core::map", "Inserting keyframe with pose: {:?}", pose);
         if features.is_empty() {
@@ -156,7 +162,7 @@ impl WorldMap {
         let mut keyframe_features = Vec::with_capacity(feature_count);
         let mut cell_lookup: Vec<Vec<usize>> = vec![Vec::new(); CELL_COUNT];
 
-        for (norm_xy, world_xyz, color) in features {
+        for (norm_xy, world_xyz, color, descriptor) in features {
             let landmark_id = self.next_landmark_id;
             self.next_landmark_id = self.next_landmark_id.saturating_add(1);
 
@@ -179,13 +185,13 @@ impl WorldMap {
                 landmark_id,
                 cell,
                 color,
+                descriptor,
             });
         }
 
         let keyframe = KeyframeData {
             id,
             pose: pose.clone(),
-            descriptor: descriptor.clone(),
             features: keyframe_features,
             cell_lookup,
         };
@@ -213,7 +219,13 @@ impl WorldMap {
         id: u64,
         pose_wc: TransformSE3,
         descriptor: KeyframeDescriptor,
-        features: Vec<(Point2<f64>, Point3<f64>, u64, Option<Rgba<u8>>)>,
+        features: Vec<(
+            Point2<f64>,
+            Point3<f64>,
+            u64,
+            Option<Rgba<u8>>,
+            FeatDescriptor<[u8; 32]>,
+        )>,
     ) {
         if features.is_empty() {
             warn!(
@@ -225,7 +237,7 @@ impl WorldMap {
 
         let mut keyframe_features = Vec::with_capacity(features.len());
         let mut cell_lookup: Vec<Vec<usize>> = vec![Vec::new(); CELL_COUNT];
-        for (norm_xy, world_xyz, landmark_id, color) in features {
+        for (norm_xy, world_xyz, landmark_id, color, descriptor) in features {
             let cell = cell_for_normalized(&norm_xy);
             let feature_index = keyframe_features.len();
             cell_lookup[cell].push(feature_index);
@@ -247,6 +259,7 @@ impl WorldMap {
                 landmark_id,
                 cell,
                 color,
+                descriptor,
             });
         }
 
@@ -254,7 +267,6 @@ impl WorldMap {
         let keyframe = KeyframeData {
             id,
             pose: pose_wc.clone(),
-            descriptor: descriptor.clone(),
             features: keyframe_features,
             cell_lookup,
         };
@@ -374,167 +386,168 @@ impl WorldMap {
         self.anchors.remove(&id).is_some()
     }
 
-    pub fn to_bytes(&self) -> Result<Vec<u8>, MapIoError> {
-        let mut keyframes: Vec<SerializableKeyframe> = self
-            .keyframes
-            .values()
-            .map(|kf| SerializableKeyframe {
-                id: kf.id,
-                pose_wc: pose_to_array(&kf.pose),
-                descriptor: kf.descriptor.as_slice().to_vec(),
-                features: kf
-                    .features
-                    .iter()
-                    .map(|feature| SerializableFeature {
-                        landmark_id: feature.landmark_id,
-                        norm_xy: [feature.norm_xy.x, feature.norm_xy.y],
-                        world_xyz: [
-                            feature.world_xyz.x,
-                            feature.world_xyz.y,
-                            feature.world_xyz.z,
-                        ],
-                        color: feature.color.map(|c| c.0).unwrap_or([255, 255, 255, 255]),
-                    })
-                    .collect(),
-            })
-            .collect();
+    // pub fn to_bytes(&self) -> Result<Vec<u8>, MapIoError> {
+    //     let mut keyframes: Vec<SerializableKeyframe> = self
+    //         .keyframes
+    //         .values()
+    //         .map(|kf| SerializableKeyframe {
+    //             id: kf.id,
+    //             pose_wc: pose_to_array(&kf.pose),
+    //             descriptor: kf.descriptor.as_slice().to_vec(),
+    //             features: kf
+    //                 .features
+    //                 .iter()
+    //                 .map(|feature| SerializableFeature {
+    //                     landmark_id: feature.landmark_id,
+    //                     norm_xy: [feature.norm_xy.x, feature.norm_xy.y],
+    //                     world_xyz: [
+    //                         feature.world_xyz.x,
+    //                         feature.world_xyz.y,
+    //                         feature.world_xyz.z,
+    //                     ],
+    //                     color: feature.color.map(|c| c.0).unwrap_or([255, 255, 255, 255]),
+    //                 })
+    //                 .collect(),
+    //         })
+    //         .collect();
 
-        keyframes.sort_by_key(|kf| kf.id);
+    //     keyframes.sort_by_key(|kf| kf.id);
 
-        let mut anchors: Vec<SerializableAnchor> = self
-            .anchors
-            .values()
-            .map(|anchor| SerializableAnchor {
-                id: anchor.id,
-                pose_wc: pose_to_array(&anchor.pose_wc),
-                created_from_keyframe: anchor.created_from_keyframe,
-            })
-            .collect();
-        anchors.sort_by_key(|anchor| anchor.id);
+    //     let mut anchors: Vec<SerializableAnchor> = self
+    //         .anchors
+    //         .values()
+    //         .map(|anchor| SerializableAnchor {
+    //             id: anchor.id,
+    //             pose_wc: pose_to_array(&anchor.pose_wc),
+    //             created_from_keyframe: anchor.created_from_keyframe,
+    //         })
+    //         .collect();
+    //     anchors.sort_by_key(|anchor| anchor.id);
 
-        let payload = SerializableMap {
-            version: MAP_VERSION,
-            provider_caps: 0,
-            world_basis: WORLD_BASIS_Y_UP,
-            keyframes,
-            anchors,
-        };
+    //     let payload = SerializableMap {
+    //         version: MAP_VERSION,
+    //         provider_caps: 0,
+    //         world_basis: WORLD_BASIS_Y_UP,
+    //         keyframes,
+    //         anchors,
+    //     };
 
-        let payload_bytes = bincode::serialize(&payload).map_err(MapIoError::Serialization)?;
-        let mut hasher = Hasher::new();
-        hasher.update(&payload_bytes);
-        let checksum = hasher.finalize();
+    //     let payload_bytes = bincode::serialize(&payload).map_err(MapIoError::Serialization)?;
+    //     let mut hasher = Hasher::new();
+    //     hasher.update(&payload_bytes);
+    //     let checksum = hasher.finalize();
 
-        let mut buffer = Vec::with_capacity(
-            MAP_MAGIC.len() + 2 + std::mem::size_of::<u32>() * 2 + payload_bytes.len(),
-        );
-        buffer.extend_from_slice(MAP_MAGIC);
-        buffer.extend_from_slice(&MAP_VERSION.to_le_bytes());
-        buffer.extend_from_slice(&(payload_bytes.len() as u32).to_le_bytes());
-        buffer.extend_from_slice(&checksum.to_le_bytes());
-        buffer.extend_from_slice(&payload_bytes);
-        Ok(buffer)
-    }
+    //     let mut buffer = Vec::with_capacity(
+    //         MAP_MAGIC.len() + 2 + std::mem::size_of::<u32>() * 2 + payload_bytes.len(),
+    //     );
+    //     buffer.extend_from_slice(MAP_MAGIC);
+    //     buffer.extend_from_slice(&MAP_VERSION.to_le_bytes());
+    //     buffer.extend_from_slice(&(payload_bytes.len() as u32).to_le_bytes());
+    //     buffer.extend_from_slice(&checksum.to_le_bytes());
+    //     buffer.extend_from_slice(&payload_bytes);
+    //     Ok(buffer)
+    // }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, MapIoError> {
-        if bytes.len() < MAP_MAGIC.len() + 2 + 4 + 4 {
-            return Err(MapIoError::InvalidHeader);
-        }
+    // pub fn from_bytes(bytes: &[u8]) -> Result<Self, MapIoError> {
+    //     if bytes.len() < MAP_MAGIC.len() + 2 + 4 + 4 {
+    //         return Err(MapIoError::InvalidHeader);
+    //     }
 
-        let (magic, remainder) = bytes.split_at(MAP_MAGIC.len());
-        if magic != MAP_MAGIC {
-            return Err(MapIoError::InvalidHeader);
-        }
+    //     let (magic, remainder) = bytes.split_at(MAP_MAGIC.len());
+    //     if magic != MAP_MAGIC {
+    //         return Err(MapIoError::InvalidHeader);
+    //     }
 
-        let (version_bytes, remainder) = remainder.split_at(2);
-        let version = u16::from_le_bytes([version_bytes[0], version_bytes[1]]);
-        if version != MAP_VERSION {
-            return Err(MapIoError::UnsupportedVersion(version));
-        }
+    //     let (version_bytes, remainder) = remainder.split_at(2);
+    //     let version = u16::from_le_bytes([version_bytes[0], version_bytes[1]]);
+    //     if version != MAP_VERSION {
+    //         return Err(MapIoError::UnsupportedVersion(version));
+    //     }
 
-        let (length_bytes, remainder) = remainder.split_at(4);
-        let payload_len = u32::from_le_bytes(length_bytes.try_into().unwrap()) as usize;
+    //     let (length_bytes, remainder) = remainder.split_at(4);
+    //     let payload_len = u32::from_le_bytes(length_bytes.try_into().unwrap()) as usize;
 
-        let (checksum_bytes, remainder) = remainder.split_at(4);
-        let expected_checksum = u32::from_le_bytes(checksum_bytes.try_into().unwrap());
+    //     let (checksum_bytes, remainder) = remainder.split_at(4);
+    //     let expected_checksum = u32::from_le_bytes(checksum_bytes.try_into().unwrap());
 
-        if remainder.len() < payload_len {
-            return Err(MapIoError::InvalidHeader);
-        }
+    //     if remainder.len() < payload_len {
+    //         return Err(MapIoError::InvalidHeader);
+    //     }
 
-        let (payload_bytes, tail) = remainder.split_at(payload_len);
-        if !tail.is_empty() {
-            return Err(MapIoError::InvalidHeader);
-        }
+    //     let (payload_bytes, tail) = remainder.split_at(payload_len);
+    //     if !tail.is_empty() {
+    //         return Err(MapIoError::InvalidHeader);
+    //     }
 
-        let mut hasher = Hasher::new();
-        hasher.update(payload_bytes);
-        let actual_checksum = hasher.finalize();
-        if actual_checksum != expected_checksum {
-            return Err(MapIoError::ChecksumMismatch {
-                expected: expected_checksum,
-                actual: actual_checksum,
-            });
-        }
+    //     let mut hasher = Hasher::new();
+    //     hasher.update(payload_bytes);
+    //     let actual_checksum = hasher.finalize();
+    //     if actual_checksum != expected_checksum {
+    //         return Err(MapIoError::ChecksumMismatch {
+    //             expected: expected_checksum,
+    //             actual: actual_checksum,
+    //         });
+    //     }
 
-        let payload: SerializableMap =
-            bincode::deserialize(payload_bytes).map_err(MapIoError::Deserialization)?;
-        if payload.version != MAP_VERSION {
-            return Err(MapIoError::UnsupportedVersion(payload.version));
-        }
-        if payload.world_basis != WORLD_BASIS_Y_UP {
-            return Err(MapIoError::InvalidHeader);
-        }
+    //     let payload: SerializableMap =
+    //         bincode::deserialize(payload_bytes).map_err(MapIoError::Deserialization)?;
+    //     if payload.version != MAP_VERSION {
+    //         return Err(MapIoError::UnsupportedVersion(payload.version));
+    //     }
+    //     if payload.world_basis != WORLD_BASIS_Y_UP {
+    //         return Err(MapIoError::InvalidHeader);
+    //     }
 
-        let mut map = WorldMap::new();
+    //     let mut map = WorldMap::new();
 
-        for keyframe in payload.keyframes {
-            let pose = pose_from_array(keyframe.pose_wc);
-            let descriptor = KeyframeDescriptor::from_slice(&keyframe.descriptor);
-            let features = keyframe
-                .features
-                .into_iter()
-                .map(|feature| {
-                    (
-                        Point2::new(feature.norm_xy[0], feature.norm_xy[1]),
-                        Point3::new(
-                            feature.world_xyz[0],
-                            feature.world_xyz[1],
-                            feature.world_xyz[2],
-                        ),
-                        feature.landmark_id,
-                        Some(Rgba::from(feature.color)),
-                    )
-                })
-                .collect();
-            map.insert_keyframe_with_id(keyframe.id, pose, descriptor, features);
-        }
+    //     for keyframe in payload.keyframes {
+    //         let pose = pose_from_array(keyframe.pose_wc);
+    //         let descriptor = KeyframeDescriptor::from_slice(&keyframe.descriptor);
+    //         let features = keyframe
+    //             .features
+    //             .into_iter()
+    //             .map(|feature| {
+    //                 (
+    //                     Point2::new(feature.norm_xy[0], feature.norm_xy[1]),
+    //                     Point3::new(
+    //                         feature.world_xyz[0],
+    //                         feature.world_xyz[1],
+    //                         feature.world_xyz[2],
+    //                     ),
+    //                     feature.landmark_id,
+    //                     Some(Rgba::from(feature.color)),
+    //                     feature.descriptor,
+    //                 )
+    //             })
+    //             .collect();
+    //         map.insert_keyframe_with_id(keyframe.id, pose, descriptor, features);
+    //     }
 
-        for anchor in payload.anchors {
-            let pose = pose_from_array(anchor.pose_wc);
-            map.anchors.insert(
-                anchor.id,
-                Anchor {
-                    id: anchor.id,
-                    pose_wc: pose.clone(),
-                    created_from_keyframe: anchor.created_from_keyframe,
-                },
-            );
-            map.next_anchor_id = map.next_anchor_id.max(anchor.id.saturating_add(1));
-        }
+    //     for anchor in payload.anchors {
+    //         let pose = pose_from_array(anchor.pose_wc);
+    //         map.anchors.insert(
+    //             anchor.id,
+    //             Anchor {
+    //                 id: anchor.id,
+    //                 pose_wc: pose.clone(),
+    //                 created_from_keyframe: anchor.created_from_keyframe,
+    //             },
+    //         );
+    //         map.next_anchor_id = map.next_anchor_id.max(anchor.id.saturating_add(1));
+    //     }
 
-        if let Some(last) = map.keyframes.values().max_by_key(|kf| kf.id) {
-            map.last_keyframe_pose = Some(last.pose.clone());
-        }
+    //     if let Some(last) = map.keyframes.values().max_by_key(|kf| kf.id) {
+    //         map.last_keyframe_pose = Some(last.pose.clone());
+    //     }
 
-        Ok(map)
-    }
+    //     Ok(map)
+    // }
 
-    pub fn load_from_bytes(&mut self, bytes: &[u8]) -> Result<(), MapIoError> {
-        let loaded = WorldMap::from_bytes(bytes)?;
-        *self = loaded;
-        Ok(())
-    }
+    // pub fn load_from_bytes(&mut self, bytes: &[u8]) -> Result<(), MapIoError> {
+    //     let loaded = WorldMap::from_bytes(bytes)?;
+    //     *self = loaded;
+    //     Ok(())
+    // }
 }
 
 #[derive(Serialize, Deserialize)]
