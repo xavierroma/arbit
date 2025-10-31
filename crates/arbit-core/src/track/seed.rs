@@ -11,7 +11,7 @@ pub mod utils;
 
 #[derive(Debug, Clone, Copy)]
 pub struct FeatureGridConfig {
-    pub cell_size: usize,
+    pub cell_size_px: usize,
     pub max_features: usize,
     pub response_threshold: f32,
     pub per_cell_cap: usize,
@@ -22,12 +22,12 @@ pub struct FeatureGridConfig {
 impl Default for FeatureGridConfig {
     fn default() -> Self {
         Self {
-            cell_size: 24,
-            max_features: 1000,
+            cell_size_px: 30,
+            max_features: 2000,
             response_threshold: 10.0,
             per_cell_cap: 100,
             nms_radius_px: 16.0,
-            window_radius: 10,
+            window_radius: 3,
         }
     }
 }

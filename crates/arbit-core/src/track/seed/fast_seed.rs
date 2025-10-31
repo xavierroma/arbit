@@ -115,7 +115,7 @@ impl FeatureSeederTrait for FastSeeder {
             let grid_cfg = self.config.grid;
             let detector_cfg = self.config.detector;
 
-            let cell = grid_cfg.cell_size.max(4);
+            let cell_size_px = grid_cfg.cell_size_px.max(4);
             let per_cell_cap = grid_cfg.per_cell_cap.max(1);
             let max_features = grid_cfg.max_features.max(per_cell_cap);
             let response_threshold = grid_cfg.response_threshold.max(0.0);
@@ -132,8 +132,8 @@ impl FeatureSeederTrait for FastSeeder {
             let y_lo = border_margin;
             let y_hi = height - border_margin;
 
-            let cells_x = ((x_hi - x_lo) + cell - 1) / cell;
-            let cells_y = ((y_hi - y_lo) + cell - 1) / cell;
+            let cells_x = ((x_hi - x_lo) + cell_size_px - 1) / cell_size_px;
+            let cells_y = ((y_hi - y_lo) + cell_size_px - 1) / cell_size_px;
 
             let mut score_map = vec![0.0f32; width * height];
             let mut candidates: Vec<Candidate> = Vec::new();
@@ -191,8 +191,8 @@ impl FeatureSeederTrait for FastSeeder {
                     continue;
                 }
 
-                let cx = (candidate.x - x_lo) / cell;
-                let cy = (candidate.y - y_lo) / cell;
+                let cx = (candidate.x - x_lo) / cell_size_px;
+                let cy = (candidate.y - y_lo) / cell_size_px;
                 if cx >= cells_x || cy >= cells_y {
                     continue;
                 }
@@ -244,7 +244,7 @@ impl FeatureSeederTrait for FastSeeder {
                 width,
                 height,
                 level.octave,
-                cell,
+                cell_size_px,
                 per_cell_cap,
                 nms_radius,
                 seeds_level.len(),

@@ -487,7 +487,7 @@ fn choose_pose(essential: &Matrix3<f64>, matches: &[FeatureMatch]) -> Option<Dec
     // Check if the winner clearly dominates
     let min_positive_ratio = 0.75; // Best must have 75%+ of inliers
     let min_positive_count = (matches.len() as f64 * 0.5) as usize; // At least 50% of matches
-    let max_reproj_error = 0.01; // Normalized coordinates, so ~1% of image
+    let max_reproj_error = 0.05; // Normalized coordinates, so ~5% of image
     let min_parallax_deg = 1.0; // Minimum average parallax in degrees
 
     if best.positive_count < min_positive_count {
