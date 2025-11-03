@@ -1,3 +1,3 @@
 # ARBit
 
-The bits of an AR framework.
+The bits of an AR library.
