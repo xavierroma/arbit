@@ -25,11 +25,11 @@ pub struct TwoViewInitializationParams {
 impl Default for TwoViewInitializationParams {
     fn default() -> Self {
         Self {
-            ransac_iterations: 200,
+            ransac_iterations: 1000,
             ransac_threshold: 1e-3,
             ransac_sample_size: 8,
             min_matches: 10,
-            min_parallax: 3.0,
+            min_parallax: 1.0,
         }
     }
 }
@@ -197,7 +197,8 @@ impl TwoViewInitializer {
 
         let mut landmarks = Vec::with_capacity(best_inliers.len());
 
-        for &idx in &best_inliers {
+        for idx in 0..matches.len() {
+            // Instead of: for &idx in &best_inliers {
             if let Some(point) = triangulate(&identity_projection, &projection_c2c1, &matches[idx])
             {
                 let depth1 = point.z;
