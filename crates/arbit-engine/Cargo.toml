@@ -47,6 +47,7 @@ tower = { version = "0.5.2", optional = true, features = ["limit", "timeout", "u
 imageproc = { version = "0.25.0", features = ["display-window"] }
 rerun = "0.26.2"
 ffmpeg-next = "8.0.0"
+anyhow = "1.0.100"
 
 
 [[bin]]

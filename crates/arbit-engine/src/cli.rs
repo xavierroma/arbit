@@ -1,10 +1,11 @@
+mod bench;
 mod track_manager;
 use crate::track_manager::{TrackConfig, TrackManager};
 use arbit_core::db::KeyframeDescriptor;
 use arbit_core::img::{build_pyramid, GrayImage, Pyramid, RgbaImage};
 use arbit_core::init::{FeatureMatch, TwoViewInitializationParams, TwoViewInitializer};
 use arbit_core::map::WorldMap;
-use arbit_core::math::projection::{CameraIntrinsics, DistortionModel};
+use arbit_core::math::projection::{px_uv_to_norm_xy, CameraIntrinsics, DistortionModel};
 use arbit_core::math::TransformSE3;
 use arbit_core::relocalize::{PnPObservation, PnPRansac, PnPRansacParams};
 use arbit_core::track::feat_descriptor::FeatDescriptorExtractor;
@@ -19,6 +20,7 @@ use nalgebra::{Matrix3, Point2, Point3, Rotation3, Translation3, UnitQuaternion,
 use rerun::external::re_log_encoding::external::lz4_flex::frame;
 use rerun::Vec2D;
 use std::collections::VecDeque;
+use std::path::Path;
 use tracing::{info, info_span};
 use tracing_subscriber::{fmt, EnvFilter};
 const K: CameraIntrinsics = CameraIntrinsics {
@@ -34,14 +36,6 @@ const K: CameraIntrinsics = CameraIntrinsics {
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
-
-/// Convert pixel coordinates to normalized camera coordinates
-fn px_uv_to_norm_xy(px: f32, py: f32, intrinsics: &CameraIntrinsics) -> Vector2<f64> {
-    Vector2::new(
-        (px as f64 - intrinsics.cx) / intrinsics.fx,
-        (py as f64 - intrinsics.cy) / intrinsics.fy,
-    )
-}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing subscriber to see logs
@@ -60,12 +54,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Check command line arguments
     let args: Vec<String> = std::env::args().collect();
     let use_video = args.len() > 1 && args[1] == "--video";
+    let use_benchmark = args.len() > 1 && args[1] == "--benchmark";
+
+    if use_benchmark {
+        let two_view_path = if args.len() > 2 {
+            Path::new(&args[2])
+        } else {
+            Path::new("data/two_view")
+        };
+
+        bench::run_benchmark(&two_view_path)?;
+        return Ok(());
+    }
 
     let imgs = if use_video {
         let video_path = if args.len() > 2 {
             args[2].clone()
         } else {
-            "src/data/cup.MOV".to_string()
+            "src/data/bedroom.MOV".to_string()
         };
 
         println!("\n📹 Processing video: {}", video_path);
@@ -246,16 +252,13 @@ impl OrbPipeline {
             orb_descriptor: OrbDescriptor::new(),
         }
     }
-    fn process_image(
-        &self,
-        img: &RgbaImage,
-    ) -> (Vec<FeatureSeed>, Vec<FeatDescriptor<[u8; 32]>>, Pyramid) {
+    fn process_image(&self, img: &RgbaImage) -> (Vec<FeatDescriptor<[u8; 32]>>, Pyramid) {
         let _span = info_span!("process_image");
         let gray_image = image::imageops::grayscale(&image::DynamicImage::ImageRgba8(img.clone()));
         let pyramid = build_pyramid(&gray_image, self.pyramid_levels);
         let features = self.compute_fast_features(&gray_image, &pyramid);
         let descriptors = self.orb_descriptor.describe(&pyramid, &features);
-        (features, descriptors, pyramid)
+        (descriptors, pyramid)
     }
     fn compute_fast_features(
         &self,
@@ -272,7 +275,6 @@ impl OrbPipeline {
 struct FrameData {
     pub frame_id: u64,
     pub img: RgbaImage,
-    pub features: Vec<FeatureSeed>,
     pub descriptors: Vec<FeatDescriptor<[u8; 32]>>,
     pub matches: Vec<FeatureMatch>,
     pub keyframe_id: Option<u64>,
@@ -332,11 +334,10 @@ impl Tracker {
 
     pub fn track(&mut self, img: &RgbaImage) -> Result<(), Box<dyn std::error::Error>> {
         let _span = info_span!("track");
-        let (features, descriptors, pyramid) = self.pipeline.process_image(img);
+        let (descriptors, pyramid) = self.pipeline.process_image(img);
         let mut frame_data = FrameData {
             frame_id: self.frame_window.len() as u64,
             img: img.clone(),
-            features,
             descriptors,
             matches: Vec::new(),
             keyframe_id: None,
@@ -344,11 +345,29 @@ impl Tracker {
             tracks: Vec::new(),
         };
 
-        if self.frame_window.len() < 1 {
+        if self.frame_window.is_empty() {
             self.log_frame(&frame_data);
             self.frame_window.push_front(frame_data);
             return Ok(());
         }
+        let prev_frame = self.frame_window.front().unwrap();
+        let matches = self
+            .matcher
+            .match_feats(&prev_frame.descriptors, &frame_data.descriptors);
+        let feat_matches = matches
+            .iter()
+            .map(|m| {
+                let pt_a = &prev_frame.descriptors[m.query_idx].seed.px_uv;
+                let pt_b = &frame_data.descriptors[m.train_idx].seed.px_uv;
+
+                FeatureMatch {
+                    norm_xy_a: px_uv_to_norm_xy(pt_a.x, pt_a.y, &K),
+                    norm_xy_b: px_uv_to_norm_xy(pt_b.x, pt_b.y, &K),
+                }
+            })
+            .collect::<Vec<_>>();
+        self.log_matched_descriptors(&prev_frame, &frame_data, &matches);
+
         info!(
             "Tracking frameId: {}; state: {:?}",
             frame_data.frame_id, self.tracking_state
@@ -356,188 +375,170 @@ impl Tracker {
         match self.tracking_state {
             TrackingState::Initial => {
                 let _span = info_span!("TrackingState::Initial");
-                for frame in self.frame_window.iter_mut() {
-                    let matches = self
-                        .matcher
-                        .match_feats(&frame.descriptors, &frame_data.descriptors);
+                let two_view_result = self.two_view_initializer.estimate(&feat_matches);
+                if let Some(tv) = two_view_result {
+                    let tv = tv.scaled(5.0);
+                    // let rotated_two_view = scaled_two_view.rotate_world_orientation(
+                    //     &Rotation3::from(TransformSE3::identity().rotation),
+                    // );
+                    let rotation_c2c1 = tv.rotation_c2c1.matrix();
+                    let translation_c2c1 = tv.translation_c2c1;
+                    let rotation_c1c2 = rotation_c2c1.transpose(); // Camera 2 → Camera 1 = Camera 2 → World
+                    let translation_c1c2 = -(rotation_c1c2 * translation_c2c1); // Camera 2 → World translation
 
-                    let feat_matches = matches
+                    let pose_c1c2 = TransformSE3::from_parts(
+                        Translation3::from(translation_c1c2),
+                        UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix(
+                            &rotation_c1c2,
+                        )),
+                    );
+                    let frame_descriptor_a = KeyframeDescriptor::from_slice(&[0.0; 5]); // TODO: real descriptor
+
+                    let features_with_colors: Vec<(
+                        Point2<f64>,
+                        Point3<f64>,
+                        Option<Rgba<u8>>,
+                        FeatDescriptor<[u8; 32]>,
+                    )> = tv
+                        .landmarks_c1
                         .iter()
-                        .map(|m| {
-                            let pt_a = &frame.descriptors[m.query_idx].seed.px_uv;
-                            let pt_b = &frame_data.descriptors[m.train_idx].seed.px_uv;
+                        .zip(feat_matches.iter().zip(matches.iter()))
+                        .map(|(landmark, (feat_match, m))| {
+                            let (norm_xy_a, cam_xyz) = landmark;
+                            // Get the pixel coordinates for the feature in frame A
+                            let px_x = (feat_match.norm_xy_a.x * K.fx + K.cx) as u32;
+                            let px_y = (feat_match.norm_xy_a.y * K.fy + K.cy) as u32;
 
-                            FeatureMatch {
-                                norm_xy_a: px_uv_to_norm_xy(pt_a.x, pt_a.y, &K),
-                                norm_xy_b: px_uv_to_norm_xy(pt_b.x, pt_b.y, &K),
+                            // Sample the pixel color from the frame
+                            let pixel = prev_frame.img.get_pixel(
+                                px_x.min(prev_frame.img.width() - 1),
+                                px_y.min(prev_frame.img.height() - 1),
+                            );
+                            let descriptor = prev_frame.descriptors[m.query_idx].clone();
+
+                            (*norm_xy_a, *cam_xyz, Some(*pixel), descriptor)
+                        })
+                        .collect::<Vec<_>>();
+
+                    let cam_a_keyframe_id = self.map.insert_keyframe(
+                        self.pose_wc,
+                        frame_descriptor_a.clone(),
+                        features_with_colors.clone(), // c1 is world so no transformation needed
+                    );
+                    self.rec
+                        .log(
+                            "two_view/cam1",
+                            &rerun::Transform3D::from_mat3x3([
+                                [1.0, 0.0, 0.0],
+                                [0.0, 1.0, 0.0],
+                                [0.0, 0.0, 1.0],
+                            ]),
+                        )
+                        .ok();
+                    self.rec
+                        .log(
+                            "two_view/cam1/image",
+                            &rerun::Image::from_image(prev_frame.img.clone()).unwrap(),
+                        )
+                        .ok();
+
+                    let pose_c2c1 = pose_c1c2.inverse();
+
+                    self.rec
+                        .log(
+                            "two_view/cam2",
+                            &rerun::Transform3D::from_translation_rotation_scale(
+                                rerun::Vec3D::new(
+                                    pose_c2c1.translation.vector.x as f32,
+                                    pose_c2c1.translation.vector.y as f32,
+                                    pose_c2c1.translation.vector.z as f32,
+                                ),
+                                rerun::Quaternion::from_xyzw([
+                                    pose_c2c1.rotation.i as f32,
+                                    pose_c2c1.rotation.j as f32,
+                                    pose_c2c1.rotation.k as f32,
+                                    pose_c2c1.rotation.w as f32,
+                                ]),
+                                1.0,
+                            ),
+                        )
+                        .ok();
+                    self.rec
+                        .log(
+                            "two_view/cam2/image",
+                            &rerun::Image::from_image(frame_data.img.clone()).unwrap(),
+                        )
+                        .ok();
+
+                    let points = features_with_colors
+                        .iter()
+                        .map(|(_, world_xyz, _, _)| {
+                            [world_xyz.x as f32, world_xyz.y as f32, world_xyz.z as f32]
+                        })
+                        .collect::<Vec<_>>();
+                    let colors = features_with_colors
+                        .iter()
+                        .map(|(_, _, color, _)| {
+                            if let Some(color) = color {
+                                rerun::Color::from_rgb(color[0], color[1], color[2])
+                            } else {
+                                rerun::Color::from_rgb(255, 0, 0)
                             }
                         })
                         .collect::<Vec<_>>();
-                    let two_view_result = self.two_view_initializer.estimate(&feat_matches);
-                    if let Some(tv) = two_view_result {
-                        let tv = tv.scaled(5.0);
-                        // let rotated_two_view = scaled_two_view.rotate_world_orientation(
-                        //     &Rotation3::from(TransformSE3::identity().rotation),
-                        // );
-                        let rotation_c2c1 = tv.rotation_c2c1.matrix();
-                        let translation_c2c1 = tv.translation_c2c1;
-                        let rotation_c1c2 = rotation_c2c1.transpose(); // Camera 2 → Camera 1 = Camera 2 → World
-                        let translation_c1c2 = -(rotation_c1c2 * translation_c2c1); // Camera 2 → World translation
+                    self.rec
+                        .log(
+                            "map/landmarks",
+                            &rerun::Points3D::new(points).with_colors(colors.clone()),
+                        )
+                        .ok();
+                    self.rec
+                        .log(
+                            "map/landmarks/image",
+                            &rerun::Image::from_image(prev_frame.img.clone()).unwrap(),
+                        )
+                        .ok();
+                    let points_2d = features_with_colors
+                        .iter()
+                        .map(|(_, _, _, d)| [d.seed.px_uv.x as f32, d.seed.px_uv.y as f32])
+                        .collect::<Vec<_>>();
+                    self.rec
+                        .log(
+                            "map/landmarks/image/descriptors",
+                            &rerun::Points2D::new(points_2d)
+                                .with_radii([2.0])
+                                .with_colors(colors),
+                        )
+                        .ok();
 
-                        let pose_c1c2 = TransformSE3::from_parts(
-                            Translation3::from(translation_c1c2),
-                            UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix(
-                                &rotation_c1c2,
-                            )),
-                        );
-                        let frame_descriptor_a = KeyframeDescriptor::from_slice(&[0.0; 5]); // TODO: real descriptor
+                    let keyframe_data = self.map.keyframe(cam_a_keyframe_id.unwrap()).unwrap();
 
-                        let features_with_colors: Vec<(
-                            Point2<f64>,
-                            Point3<f64>,
-                            Option<Rgba<u8>>,
-                            FeatDescriptor<[u8; 32]>,
-                        )> = tv
-                            .landmarks_c1
+                    self.tracked_descriptors.extend(
+                        keyframe_data
+                            .features()
                             .iter()
-                            .zip(feat_matches.iter().zip(matches.iter()))
-                            .map(|(landmark, (feat_match, m))| {
-                                let (norm_xy_a, cam_xyz) = landmark;
-                                // Get the pixel coordinates for the feature in frame A
-                                let px_x = (feat_match.norm_xy_a.x * K.fx + K.cx) as u32;
-                                let px_y = (feat_match.norm_xy_a.y * K.fy + K.cy) as u32;
-
-                                // Sample the pixel color from the frame
-                                let pixel = frame.img.get_pixel(
-                                    px_x.min(frame.img.width() - 1),
-                                    px_y.min(frame.img.height() - 1),
-                                );
-                                let descriptor = frame.descriptors[m.query_idx].clone();
-
-                                (*norm_xy_a, *cam_xyz, Some(*pixel), descriptor)
-                            })
-                            .collect::<Vec<_>>();
-
-                        let cam_a_keyframe_id = self.map.insert_keyframe(
-                            self.pose_wc,
-                            frame_descriptor_a.clone(),
-                            features_with_colors.clone(), // c1 is world so no transformation needed
-                        );
-                        self.rec
-                            .log(
-                                "two_view/cam1",
-                                &rerun::Transform3D::from_mat3x3([
-                                    [1.0, 0.0, 0.0],
-                                    [0.0, 1.0, 0.0],
-                                    [0.0, 0.0, 1.0],
-                                ]),
-                            )
-                            .ok();
-                        self.rec
-                            .log(
-                                "two_view/cam1/image",
-                                &rerun::Image::from_image(frame.img.clone()).unwrap(),
-                            )
-                            .ok();
-
-                        let pose_c2c1 = pose_c1c2.inverse();
-
-                        self.rec
-                            .log(
-                                "two_view/cam2",
-                                &rerun::Transform3D::from_translation_rotation_scale(
-                                    rerun::Vec3D::new(
-                                        pose_c2c1.translation.vector.x as f32,
-                                        pose_c2c1.translation.vector.y as f32,
-                                        pose_c2c1.translation.vector.z as f32,
-                                    ),
-                                    rerun::Quaternion::from_xyzw([
-                                        pose_c2c1.rotation.i as f32,
-                                        pose_c2c1.rotation.j as f32,
-                                        pose_c2c1.rotation.k as f32,
-                                        pose_c2c1.rotation.w as f32,
-                                    ]),
-                                    1.0,
-                                ),
-                            )
-                            .ok();
-                        self.rec
-                            .log(
-                                "two_view/cam2/image",
-                                &rerun::Image::from_image(frame_data.img.clone()).unwrap(),
-                            )
-                            .ok();
-
-                        let points = features_with_colors
-                            .iter()
-                            .map(|(_, world_xyz, _, _)| {
-                                [world_xyz.x as f32, world_xyz.y as f32, world_xyz.z as f32]
-                            })
-                            .collect::<Vec<_>>();
-                        let colors = features_with_colors
-                            .iter()
-                            .map(|(_, _, color, _)| {
-                                if let Some(color) = color {
-                                    rerun::Color::from_rgb(color[0], color[1], color[2])
-                                } else {
-                                    rerun::Color::from_rgb(255, 0, 0)
-                                }
-                            })
-                            .collect::<Vec<_>>();
-                        self.rec
-                            .log(
-                                "map/landmarks",
-                                &rerun::Points3D::new(points).with_colors(colors.clone()),
-                            )
-                            .ok();
-                        self.rec
-                            .log(
-                                "map/landmarks/image",
-                                &rerun::Image::from_image(frame.img.clone()).unwrap(),
-                            )
-                            .ok();
-                        let points_2d = features_with_colors
-                            .iter()
-                            .map(|(_, _, _, d)| [d.seed.px_uv.x as f32, d.seed.px_uv.y as f32])
-                            .collect::<Vec<_>>();
-                        self.rec
-                            .log(
-                                "map/landmarks/image/descriptors",
-                                &rerun::Points2D::new(points_2d)
-                                    .with_radii([2.0])
-                                    .with_colors(colors),
-                            )
-                            .ok();
-
-                        let keyframe_data = self.map.keyframe(cam_a_keyframe_id.unwrap()).unwrap();
-
-                        self.tracked_descriptors.extend(
-                            keyframe_data
-                                .features()
-                                .iter()
-                                .map(|d| (d.landmark_id, d.descriptor.clone(), d.world_xyz)),
-                        );
-                        frame.keyframe_id = cam_a_keyframe_id;
-                        frame_data.keyframe_id =
-                            self.map
-                                .insert_keyframe(pose_c1c2, frame_descriptor_a.clone(), vec![]);
-                        self.pose_wc = pose_c1c2;
-                        info!("Pose WC: {:?}", self.pose_wc);
-                        self.pose_wc_traj.push((self.pose_wc, frame_data.frame_id));
-                        self.tracking_state = TrackingState::Tracking;
-                    } else {
-                        info!("Could not initiate two_view")
-                    }
+                            .map(|d| (d.landmark_id, d.descriptor.clone(), d.world_xyz)),
+                    );
+                    self.frame_window.front_mut().unwrap().keyframe_id = cam_a_keyframe_id;
+                    frame_data.keyframe_id =
+                        self.map
+                            .insert_keyframe(pose_c1c2, frame_descriptor_a.clone(), vec![]);
+                    self.pose_wc = pose_c1c2;
+                    info!("Pose WC: {:?}", self.pose_wc);
+                    self.pose_wc_traj.push((self.pose_wc, frame_data.frame_id));
+                    self.tracking_state = TrackingState::Tracking;
+                } else {
+                    info!("Could not initiate two_view")
                 }
             }
             TrackingState::Tracking => {
                 let _span = info_span!("TrackingState::Tracking");
                 // let prev_frame = self.frame_window.front().unwrap();
                 // let (_stats, mut tracks) = self.flow_tracker.advance_alive(
-                //     &prev_frame.pyramid,
+                //     &prev_prev_frame.pyramid,
                 //     &frame_data.pyramid,
                 //     &K,
-                //     prev_frame.frame_id,
+                //     prev_prev_frame.frame_id,
                 //     frame_data.frame_id,
                 // );
                 // // if self.flow_tracker.need_more_features() {
@@ -665,11 +666,11 @@ impl Tracker {
             .ok();
 
         // 4. Log 2D feature points detected in this frame
-        if !frame_data.features.is_empty() {
+        if !frame_data.descriptors.is_empty() {
             let points_2d: Vec<[f32; 2]> = frame_data
-                .features
+                .descriptors
                 .iter()
-                .map(|f| [f.px_uv.x, f.px_uv.y])
+                .map(|d| [d.seed.px_uv.x, d.seed.px_uv.y])
                 .collect();
 
             self.rec
@@ -764,6 +765,200 @@ impl Tracker {
                         .with_colors(colors),
                 )
                 .ok();
+        }
+    }
+
+    /// Log matched descriptors between two frames with visual lines connecting them
+    fn log_matched_descriptors(
+        &self,
+        prev_frame: &FrameData,
+        curr_frame: &FrameData,
+        matches: &[arbit_core::track::feat_matcher::Match],
+    ) {
+        // Set timeline to current frame
+        let frame_count = self.frame_window.len() as i64;
+        self.rec.set_time_sequence("frame", frame_count);
+
+        // Log previous frame image
+        self.rec
+            .log(
+                "matching/prev_frame/image",
+                &rerun::Image::from_image(prev_frame.img.clone()).unwrap(),
+            )
+            .ok();
+
+        // Log current frame image
+        self.rec
+            .log(
+                "matching/curr_frame/image",
+                &rerun::Image::from_image(curr_frame.img.clone()).unwrap(),
+            )
+            .ok();
+
+        // Log descriptors on previous frame
+        if !prev_frame.descriptors.is_empty() {
+            let points_2d: Vec<[f32; 2]> = prev_frame
+                .descriptors
+                .iter()
+                .map(|d| [d.seed.px_uv.x, d.seed.px_uv.y])
+                .collect();
+
+            self.rec
+                .log(
+                    "matching/prev_frame/image/descriptors",
+                    &rerun::Points2D::new(points_2d)
+                        .with_radii([3.0])
+                        .with_colors([rerun::Color::from_rgb(255, 100, 100)]),
+                )
+                .ok();
+        }
+
+        // Log descriptors on current frame
+        if !curr_frame.descriptors.is_empty() {
+            let points_2d: Vec<[f32; 2]> = curr_frame
+                .descriptors
+                .iter()
+                .map(|d| [d.seed.px_uv.x, d.seed.px_uv.y])
+                .collect();
+
+            self.rec
+                .log(
+                    "matching/curr_frame/image/descriptors",
+                    &rerun::Points2D::new(points_2d)
+                        .with_radii([3.0])
+                        .with_colors([rerun::Color::from_rgb(100, 100, 255)]),
+                )
+                .ok();
+        }
+
+        // Log match lines on previous frame
+        if !matches.is_empty() {
+            let mut line_strips_prev = Vec::new();
+            for m in matches.iter().take(100) {
+                let pt = [
+                    prev_frame.descriptors[m.query_idx].seed.px_uv.x,
+                    prev_frame.descriptors[m.query_idx].seed.px_uv.y,
+                ];
+                line_strips_prev.push(vec![pt, pt]); // Single point as line strip
+            }
+
+            if !line_strips_prev.is_empty() {
+                self.rec
+                    .log(
+                        "matching/prev_frame/image/matched_points",
+                        &rerun::LineStrips2D::new(line_strips_prev)
+                            .with_colors([rerun::Color::from_rgb(0, 255, 0)]),
+                    )
+                    .ok();
+            }
+        }
+
+        // Log match lines on current frame
+        if !matches.is_empty() {
+            let mut line_strips_curr = Vec::new();
+            for m in matches.iter().take(100) {
+                let pt = [
+                    curr_frame.descriptors[m.train_idx].seed.px_uv.x,
+                    curr_frame.descriptors[m.train_idx].seed.px_uv.y,
+                ];
+                line_strips_curr.push(vec![pt, pt]); // Single point as line strip
+            }
+
+            if !line_strips_curr.is_empty() {
+                self.rec
+                    .log(
+                        "matching/curr_frame/image/matched_points",
+                        &rerun::LineStrips2D::new(line_strips_curr)
+                            .with_colors([rerun::Color::from_rgb(0, 255, 0)]),
+                    )
+                    .ok();
+            }
+        }
+
+        // Create a combined view with both images side by side
+        // and lines connecting matched descriptors
+        if !matches.is_empty() {
+            let (width_prev, height_prev) = prev_frame.img.dimensions();
+            let (width_curr, height_curr) = curr_frame.img.dimensions();
+
+            // Stack images horizontally
+            let combined_width = width_prev + width_curr;
+            let combined_height = height_prev.max(height_curr);
+
+            // Create combined image
+            let mut combined_img = RgbaImage::new(combined_width, combined_height);
+
+            // Copy previous frame to left side
+            for y in 0..height_prev {
+                for x in 0..width_prev {
+                    let pixel = prev_frame.img.get_pixel(x, y);
+                    combined_img.put_pixel(x, y, *pixel);
+                }
+            }
+
+            // Copy current frame to right side
+            for y in 0..height_curr {
+                for x in 0..width_curr {
+                    let pixel = curr_frame.img.get_pixel(x, y);
+                    combined_img.put_pixel(x + width_prev, y, *pixel);
+                }
+            }
+
+            // Log combined image
+            self.rec
+                .log(
+                    "matching/combined/image",
+                    &rerun::Image::from_image(combined_img).unwrap(),
+                )
+                .ok();
+
+            // Log match lines across the combined image
+            let mut line_strips_combined = Vec::new();
+            for m in matches.iter().take(200) {
+                let pt_a = [
+                    prev_frame.descriptors[m.query_idx].seed.px_uv.x,
+                    prev_frame.descriptors[m.query_idx].seed.px_uv.y,
+                ];
+                let pt_b = [
+                    curr_frame.descriptors[m.train_idx].seed.px_uv.x + width_prev as f32,
+                    curr_frame.descriptors[m.train_idx].seed.px_uv.y,
+                ];
+                line_strips_combined.push(vec![pt_a, pt_b]);
+            }
+
+            if !line_strips_combined.is_empty() {
+                self.rec
+                    .log(
+                        "matching/combined/image/match_lines",
+                        &rerun::LineStrips2D::new(line_strips_combined)
+                            .with_colors([rerun::Color::from_rgb(0, 255, 0)]),
+                    )
+                    .ok();
+            }
+
+            // Log matched descriptors on combined image
+            let mut matched_points = Vec::new();
+            for m in matches.iter().take(200) {
+                matched_points.push([
+                    prev_frame.descriptors[m.query_idx].seed.px_uv.x,
+                    prev_frame.descriptors[m.query_idx].seed.px_uv.y,
+                ]);
+                matched_points.push([
+                    curr_frame.descriptors[m.train_idx].seed.px_uv.x + width_prev as f32,
+                    curr_frame.descriptors[m.train_idx].seed.px_uv.y,
+                ]);
+            }
+
+            if !matched_points.is_empty() {
+                self.rec
+                    .log(
+                        "matching/combined/image/matched_keypoints",
+                        &rerun::Points2D::new(matched_points)
+                            .with_radii([3.0])
+                            .with_colors([rerun::Color::from_rgb(0, 255, 0)]),
+                    )
+                    .ok();
+            }
         }
     }
 }
