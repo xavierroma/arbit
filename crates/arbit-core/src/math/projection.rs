@@ -133,6 +133,14 @@ impl CameraIntrinsics {
     }
 }
 
+/// Converts pixel coordinates to normalized camera coordinates.
+pub fn px_uv_to_norm_xy(px: f32, py: f32, intrinsics: &CameraIntrinsics) -> Vector2<f64> {
+    Vector2::new(
+        (px as f64 - intrinsics.cx) / intrinsics.fx,
+        (py as f64 - intrinsics.cy) / intrinsics.fy,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

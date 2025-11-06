@@ -1,8 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use arbit_core::img::{Pyramid, PyramidLevel};
 use arbit_core::math::CameraIntrinsics;
