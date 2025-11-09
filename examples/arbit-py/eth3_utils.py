@@ -109,7 +109,7 @@ def load_ground_truth_poses(file):
     return poses
 
 
-Eth3Calib = namedtuple('Eth3Calib', ['cam0', 'cam1', 'doffs', 'baseline', 'width', 'height', 'ndisp'])
+Eth3Calib = namedtuple('Eth3Calib', ['cam0', 'cam1', 'doffs', 'width', 'height', 'ndisp'])
 class Eth3Case:
   def __init__(self, im0: Path, im1: Path, calib: Eth3Calib, gt_poses: dict):
     self.im0 = im0
@@ -119,10 +119,46 @@ class Eth3Case:
 
 def load_case(directory: Path):
     im0path = directory / 'im0.png'
-    im1path = directory / 'im1.png'
+    im1path = directory / 'im2.png'
     assert im0path.exists() and im1path.exists(), f"Images not found in {directory}"
     assert (directory / 'calib.txt').exists(), f"Calibration file not found in {directory}"
-    assert (directory / 'images.txt').exists(), f"Ground truth poses file not found in {directory}"
+    # assert (directory / 'images.txt').exists(), f"Ground truth poses file not found in {directory}"
     calib = load_calibration(directory / 'calib.txt')
-    gt = load_ground_truth_poses(directory / 'images.txt')
-    return Eth3Case(im0path, im1path, Eth3Calib(**calib), gt_poses=gt)
+    # gt = load_ground_truth_poses(directory / 'images.txt')
+    return Eth3Case(im0path, im1path, Eth3Calib(**calib), gt_poses={})
+
+
+
+def analyse_result(case: Eth3Case, front_end):
+    print("\n" + "="*60)
+    print("POSE ESTIMATION RESULTS")
+    print("="*60)
+    
+    gt_pose = case.gt_poses[0]
+    print("\nGround truth pose:")
+    print(gt_pose)
+    print("\nRecovered pose:")
+    print(front_end.pose_w_to_c)
+    print("\n--- Pose Errors ---")
+    
+    R_gt = gt_pose['R']
+    t_gt = gt_pose['t']
+    R_rec = front_end.pose_w_to_c[:3, :3]
+    t_rec = front_end.pose_w_to_c[:3, 3:4]
+    
+    # Rotation error using Frobenius norm
+    R_error = np.linalg.norm(R_gt - R_rec, 'fro')
+    print(f"Rotation error (Frobenius norm): {R_error:.6f}")
+    # Rotation error in degrees using trace
+    trace_val = np.trace(R_gt.T @ R_rec)
+    # Clamp to valid range [-1, 3] to avoid numerical issues with arccos
+    trace_val = np.clip((trace_val - 1) / 2, -1, 1)
+    angle_error = np.arccos(trace_val) * 180 / np.pi
+    print(f"Rotation error (angle): {angle_error:.4f} degrees")
+
+    # Translation error (direction only, since scale is ambiguous)
+    t_gt_normalized = t_gt / np.linalg.norm(t_gt)
+    t_rec_normalized = t_rec / np.linalg.norm(t_rec)
+    t_angle_error = np.arccos(np.clip(np.dot(t_gt_normalized.T, t_rec_normalized)[0][0], -1, 1))
+    t_angle_error_deg = t_angle_error * 180 / np.pi
+    print(f"Translation direction error: {t_angle_error_deg:.4f} degrees")
