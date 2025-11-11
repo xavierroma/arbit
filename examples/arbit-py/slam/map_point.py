@@ -238,7 +238,10 @@ class MapPoint:
         # Keep descriptors and position for potential recovery
     
     def __repr__(self) -> str:
-      return (f"MapPoint(id={self.id}, obs={len(self.observations)}, "
-            f"descs={len(self.descriptors)}, bad={self.is_bad})")
+        """String representation of MapPoint."""
+        n_obs = len(self.observations)
+        n_descs = len(self.descriptors)
+        pos_str = f"[{self.position[0]:.2f}, {self.position[1]:.2f}, {self.position[2]:.2f}]"
+        return f"MapPoint(id={self.id}, pos={pos_str}, obs={n_obs}, descs={n_descs}, bad={self.is_bad})"
 
 

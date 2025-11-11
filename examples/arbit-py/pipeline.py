@@ -6,24 +6,30 @@ from pathlib import Path
 from enum import Enum, auto
 from visualizer import visualize_frontend
 
+from slam import CameraMatrix, Map, KeyFrame, MapPoint, to_matrix
+
 class PipelineState(Enum):
     PRE_INIT = auto()
     INIT = auto()
     INITIALISED = auto()
 
 
-CameraMatrix = namedtuple('CameraMatrix', ['cx', 'cy', 'fx', 'fy'])
-
-
 class Front_End:
   def __init__(self, camera_matrix: CameraMatrix):
     self.orb = cv2.ORB.create(2000)
     self.state: PipelineState = PipelineState.PRE_INIT
+    
+    self.camera_matrix = to_matrix(camera_matrix)
+    
+    self.map = Map()
+    
     self.prev_frame: np.ndarray | None = None
-    self.camera_matrix = np.array([[camera_matrix.fx, 0, camera_matrix.cx], [0, camera_matrix.fy, camera_matrix.cy], [0, 0, 1]])
-    self.pose_w_to_c = np.eye(4)
-    self.map_points_3d: np.ndarray | None = None  # 3D world points
+    self.prev_keypoints: list | None = None
+    self.prev_descriptors: np.ndarray | None = None
+    
+    # Tracking info
     self.init_method: str = ""  # Track which method was used (H or F)
+    self.current_keyframe: KeyFrame | None = None
 
   def ingest_image(self, image: np.ndarray):
     match self.state:
@@ -35,7 +41,11 @@ class Front_End:
         self.initialised(image)
 
   def pre_init(self, image: np.ndarray):
+    """Store first frame and extract features."""
     self.prev_frame = image
+    self.prev_keypoints, self.prev_descriptors = self.orb.detectAndCompute(image, None)
+    n_keypoints = len(self.prev_keypoints) if self.prev_keypoints is not None else 0
+    print(f"PRE_INIT: Detected {n_keypoints} keypoints in first frame")
     self.state = PipelineState.INIT
 
   def compute_symmetric_transfer_error(self, points0: np.ndarray, points1: np.ndarray, 
@@ -143,9 +153,16 @@ class Front_End:
 
   def init(self, image: np.ndarray):
     assert self.prev_frame is not None, "prev_frame must be set before init"
-    keypoints0, descriptors0 = self.orb.detectAndCompute(self.prev_frame, None)  # type: ignore
+    assert self.prev_keypoints is not None, "prev_keypoints must be set before init"
+    assert self.prev_descriptors is not None, "prev_descriptors must be set before init"
+    
+    # Use pre-extracted features for frame 0
+    keypoints0 = self.prev_keypoints
+    descriptors0 = self.prev_descriptors
+    
+    # Extract features for frame 1
     keypoints1, descriptors1 = self.orb.detectAndCompute(image, None)  # type: ignore
-    print(f"Detected {len(keypoints0)} keypoints in frame 0, {len(keypoints1)} keypoints in frame 1")
+    print(f"INIT: Frame 0: {len(keypoints0)} keypoints, Frame 1: {len(keypoints1)} keypoints")
     
     matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
     matches = matcher.match(descriptors0, descriptors1)
@@ -255,39 +272,152 @@ class Front_End:
       points_3d, valid_mask = self.triangulate_points(points0_inliers, points1_inliers, R, t)
     
     # ========================================
-    # Store Results
+    # Create Map Structure (KeyFrames + MapPoints)
     # ========================================
     
-    self.pose_w_to_c = np.hstack((R, t))
-    self.map_points_3d = points_3d[valid_mask]
+    # Get original match indices to track which keypoints were used
+    if self.init_method == "Homography":
+      # For homography, we have H_inlier_indices which maps to original matches
+      match_indices = H_inlier_indices
+    else:
+      # For fundamental, we have F_inlier_indices
+      match_indices = F_inlier_indices
     
-    print(f"\nInitialization successful!")
+    # Build KeyFrame 0 (first frame, origin pose)
+    pose_kf0 = np.eye(4)  # World origin
+    kf0 = KeyFrame(
+      image=self.prev_frame,
+      camera_matrix=self.camera_matrix,
+      pose_c_to_w=pose_kf0,
+      keypoints=keypoints0,
+      descriptors=descriptors0
+    )
+    
+    # Build KeyFrame 1 (second frame, recovered pose)
+    # R and t represent world-to-camera, need to invert for camera-to-world
+    pose_kf1 = np.eye(4)
+    pose_kf1[:3, :3] = R.T
+    pose_kf1[:3, 3] = -R.T @ t.ravel()
+    kf1 = KeyFrame(
+      image=image,
+      camera_matrix=self.camera_matrix,
+      pose_c_to_w=pose_kf1,
+      keypoints=keypoints1,
+      descriptors=descriptors1
+    )
+    
+    # Create MapPoints and link to KeyFrames
+    n_valid = np.sum(valid_mask)
+    map_point_ids = []
+    
+    for i, (is_valid, point_3d) in enumerate(zip(valid_mask, points_3d)):
+      if not is_valid:
+        continue
+      
+      # Get the match index for this inlier
+      match_idx = match_indices[i]
+      match = matches[match_idx]
+      kp0_idx = match.queryIdx  # Index in keypoints0
+      kp1_idx = match.trainIdx  # Index in keypoints1
+      
+      # Create MapPoint WITHOUT initial descriptor to avoid duplication bug
+      mp = MapPoint(position=point_3d)
+      
+      # Add to Map first
+      self.map.add_map_point(mp)
+      map_point_ids.append(mp.id)
+      
+      # Link to KeyFrames (this will add descriptors)
+      # TODO: simplify interface between KeyFrame and MapPoint; MapPoint is always created in the same way
+      kf0.add_map_point(mp, kp0_idx)
+      kf1.add_map_point(mp, kp1_idx)
+    
+    # Add KeyFrames to Map
+    self.map.add_keyframe(kf0)
+    self.map.add_keyframe(kf1)
+    
+    # Set current keyframe for tracking
+    self.current_keyframe = kf1
+    
+    # Print statistics
+    print(f"\n{'='*60}")
+    print(f"Initialization successful!")
     print(f"Method: {self.init_method}")
-    print(f"Triangulated {np.sum(valid_mask)} / {len(points_3d)} 3D map points")
-    if self.map_points_3d is not None and len(self.map_points_3d) > 0:
-      print(f"Average depth: {np.mean(self.map_points_3d[:, 2]):.2f}")
-      print(f"Depth range: [{np.min(self.map_points_3d[:, 2]):.2f}, {np.max(self.map_points_3d[:, 2]):.2f}]")
+    print(f"Triangulated {n_valid} / {len(points_3d)} 3D map points")
+    print(f"Map: {self.map}")
+    print(f"KeyFrame 0: {kf0}")
+    print(f"KeyFrame 1: {kf1}")
+    
+    valid_points = points_3d[valid_mask]
+    if len(valid_points) > 0:
+      print(f"Average depth: {np.mean(valid_points[:, 2]):.2f}")
+      print(f"Depth range: [{np.min(valid_points[:, 2]):.2f}, {np.max(valid_points[:, 2]):.2f}]")
+    print(f"{'='*60}\n")
     
     self.state = PipelineState.INITIALISED
 
 
   def initialised(self, image: np.ndarray):
+    """Process frames after initialization (tracking state)."""
+    # TODO: Implement tracking against local map
+    # 1. Extract features from current frame
+    # 2. Match against local map points
+    # 3. Estimate pose via PnP
+    # 4. Decide if new keyframe needed
+    # 5. Local mapping / BA
     pass
+  
+  def get_map_statistics(self):
+    """Get statistics about the current map for visualization/debugging."""
+    stats = {
+      'n_keyframes': len(self.map.get_all_keyframes()),
+      'n_map_points': len(self.map.get_all_map_points()),
+      'init_method': self.init_method
+    }
+    
+    # Get all 3D positions for visualization
+    map_points = self.map.get_all_map_points()
+    if len(map_points) > 0:
+      positions = np.array([mp.position for mp in map_points])
+      stats['map_points_3d'] = positions
+      stats['mean_depth'] = np.mean(positions[:, 2])
+      stats['std_depth'] = np.std(positions[:, 2])
+      stats['min_depth'] = np.min(positions[:, 2])
+      stats['max_depth'] = np.max(positions[:, 2])
+    else:
+      stats['map_points_3d'] = np.array([])
+    
+    return stats
 
 if __name__ == "__main__":
-  case = load_case(Path('data/two-view/exa2'))
+  case = load_case(Path('data/two-view/exa'))
   front_end = Front_End(CameraMatrix(cx=case.calib.cam0[0][2], cy=case.calib.cam0[1][2], fx=case.calib.cam0[0][0], fy=case.calib.cam0[1][1]))
+  
+  # Process images
   for im in [case.im0, case.im1]:
     front_end.ingest_image(cv2.imread(im, cv2.IMREAD_GRAYSCALE))
   
-  print("\n--- 3D Map Points ---")
-  if front_end.map_points_3d is not None and len(front_end.map_points_3d) > 0:
-    print(f"Total map points: {len(front_end.map_points_3d)}")
-    print(f"Mean depth: {np.mean(front_end.map_points_3d[:, 2]):.3f}")
-    print(f"Std depth: {np.std(front_end.map_points_3d[:, 2]):.3f}")
-    print(f"Min/Max depth: [{np.min(front_end.map_points_3d[:, 2]):.3f}, {np.max(front_end.map_points_3d[:, 2]):.3f}]")
+  # Get and print map statistics
+  stats = front_end.get_map_statistics()
+  
+  print("\n--- Map Statistics ---")
+  print(f"KeyFrames: {stats['n_keyframes']}")
+  print(f"MapPoints: {stats['n_map_points']}")
+  print(f"Initialization method: {stats['init_method']}")
+  
+  if stats['n_map_points'] > 0:
+    print(f"Mean depth: {stats['mean_depth']:.3f}")
+    print(f"Std depth: {stats['std_depth']:.3f}")
+    print(f"Min/Max depth: [{stats['min_depth']:.3f}, {stats['max_depth']:.3f}]")
   else:
     print("No map points triangulated")
+  
+  # Print covisibility information
+  print("\n--- Covisibility Graph ---")
+  for kf in front_end.map.get_all_keyframes():
+    print(f"{kf}")
+    if kf.parent:
+      print(f"  Parent: KeyFrame {kf.parent.id}")
   
   print("\n" + "="*60)
   

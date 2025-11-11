@@ -314,8 +314,11 @@ class KeyFrame:
             if dist <= radius:
                 indices.append(i)
         return indices
-        
+    
     def __repr__(self) -> str:
-        return (f"KeyFrame(id={self.id}, n_points={self.get_n_matches()}, "
-                f"n_connections={len(self.connected_keyframes)})")
+        """String representation of KeyFrame."""
+        n_matches = self.get_n_matches()
+        n_connections = len(self.connected_keyframes)
+        parent_id = self.parent.id if self.parent else None
+        return f"KeyFrame(id={self.id}, matches={n_matches}, connections={n_connections}, parent={parent_id})"
 

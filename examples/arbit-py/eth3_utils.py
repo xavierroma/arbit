@@ -119,7 +119,7 @@ class Eth3Case:
 
 def load_case(directory: Path):
     im0path = directory / 'im0.png'
-    im1path = directory / 'im2.png'
+    im1path = directory / 'im1.png'
     assert im0path.exists() and im1path.exists(), f"Images not found in {directory}"
     assert (directory / 'calib.txt').exists(), f"Calibration file not found in {directory}"
     # assert (directory / 'images.txt').exists(), f"Ground truth poses file not found in {directory}"

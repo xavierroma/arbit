@@ -251,39 +251,44 @@ def visualize_frontend(front_end, title: str = "SLAM Initialization",
         print(f"Warning: Frontend state is {front_end.state.name}, not INITIALISED")
         return
     
-    if front_end.map_points_3d is None or len(front_end.map_points_3d) == 0:
+    # Get map points from the Map structure
+    map_points = front_end.map.get_all_map_points()
+    if len(map_points) == 0:
         print("Error: No map points to visualize")
         return
+    
+    # Extract 3D positions
+    positions_3d = np.array([mp.position for mp in map_points])
     
     # Create visualizer
     viz = MapVisualizer(figsize=(14, 10))
     
-    # Add camera poses
-    # Camera 0 at origin (identity)
-    viz.add_camera_pose(
-        R=np.eye(3),
-        t=np.zeros((3, 1)),
-        label="Camera 0 (Reference)",
-        color="blue",
-        scale=2.0
-    )
+    # Add all keyframe camera poses
+    keyframes = front_end.map.get_all_keyframes()
+    colors = ['blue', 'red', 'green', 'orange', 'purple', 'cyan']
     
-    # Camera 1 at recovered pose
-    R_cam1 = front_end.pose_w_to_c[:3, :3]
-    t_cam1 = front_end.pose_w_to_c[:3, 3:4]
-    viz.add_camera_pose(
-        R=R_cam1,
-        t=t_cam1,
-        label="Camera 1 (Current)",
-        color="red",
-        scale=2.0
-    )
+    for i, kf in enumerate(keyframes):
+        # Get world-to-camera pose
+        pose_w_to_c = kf.get_pose_w_to_c()
+        R = pose_w_to_c[:3, :3]
+        t = pose_w_to_c[:3, 3:4]
+        
+        color = colors[i % len(colors)]
+        label = f"Camera {i}" + (" (Reference)" if i == 0 else " (Current)" if i == len(keyframes)-1 else "")
+        
+        viz.add_camera_pose(
+            R=R,
+            t=t,
+            label=label,
+            color=color,
+            scale=2.0
+        )
     
     # Add map points
-    viz.set_map_points(front_end.map_points_3d)
+    viz.set_map_points(positions_3d)
     
     # Visualize
-    full_title = f"{title}\nMethod: {front_end.init_method} | Points: {len(front_end.map_points_3d)}"
+    full_title = f"{title}\nMethod: {front_end.init_method} | Points: {len(map_points)} | KeyFrames: {len(keyframes)}"
     viz.visualize(title=full_title, point_size=30, point_color='darkgreen')
     
     # Save if requested

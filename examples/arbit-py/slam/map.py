@@ -357,6 +357,9 @@ class Map:
         num_keyframes = len(self.get_all_keyframes())
         num_map_points = len(self.get_all_map_points())
         return (num_keyframes, num_map_points)
-
+    
     def __repr__(self) -> str:
-        return f"Map(kfs={len(self.keyframes)}, points={len(self.get_all_map_points())})"
+        """String representation of Map."""
+        n_kfs = len(self.get_all_keyframes())
+        n_points = len(self.get_all_map_points())
+        return f"Map(keyframes={n_kfs}, map_points={n_points})"
