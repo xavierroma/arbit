@@ -186,6 +186,24 @@ class Front_End:
     descriptor_array = np.asarray(descriptors, dtype=np.uint8) if descriptors else np.empty((0, 32), dtype=np.uint8)
     return map_points, descriptor_array, projections
 
+  def _sample_keypoint_color(self, image: np.ndarray, keypoint: cv2.KeyPoint) -> np.ndarray:
+    """Sample RGB color from the image at the keypoint location."""
+    if image is None or keypoint is None:
+      return np.array([0, 255, 0], dtype=np.uint8)
+    h, w = image.shape[:2]
+    x = int(np.clip(round(keypoint.pt[0]), 0, w - 1))
+    y = int(np.clip(round(keypoint.pt[1]), 0, h - 1))
+    pixel = image[y, x]
+    if image.ndim == 2:
+      value = int(pixel)
+      return np.array([value, value, value], dtype=np.uint8)
+    if pixel.ndim == 0:
+      value = int(pixel)
+      return np.array([value, value, value], dtype=np.uint8)
+    # Assume BGR from OpenCV, convert to RGB
+    bgr = pixel.astype(np.uint8)
+    return np.array([bgr[2], bgr[1], bgr[0]], dtype=np.uint8)
+
   def _build_keyframe_metrics(self, n_tracked: int, current_pose: np.ndarray) -> dict:
     translation = 0.0
     rotation = 0.0
@@ -451,7 +469,8 @@ class Front_End:
       match = matches[match_idx]
       kp0_idx, kp1_idx = match.queryIdx, match.trainIdx
       
-      mp = MapPoint(position=point_3d)
+      kp_color = self._sample_keypoint_color(kf1.image, kf1.keypoints[kp1_idx])
+      mp = MapPoint(position=point_3d, color=kp_color)
       kf0.add_map_point(mp, kp0_idx)
       kf1.add_map_point(mp, kp1_idx)
       self.map.add_map_point(mp)
@@ -558,6 +577,9 @@ class Front_End:
         kf.add_map_point(mp, kp_idx)
       except ValueError:
         continue
+      if mp.get_color() is None:
+        sampled_color = self._sample_keypoint_color(image, keypoints[kp_idx])
+        mp.set_color(sampled_color)
     keyframe_metrics = self._build_keyframe_metrics(len(matches), T_c_to_w)
     if self._should_insert_keyframe(keyframe_metrics):
       self.map.add_keyframe(kf)
@@ -624,6 +646,9 @@ class Front_End:
         if neighbor_mp is not None and not neighbor_mp.is_bad:
           if not neighbor_mp.is_in_keyframe(kf.id):
             kf.add_map_point(neighbor_mp, kf_idx)
+            if neighbor_mp.get_color() is None:
+              sampled_color = self._sample_keypoint_color(kf.image, kf.keypoints[kf_idx])
+              neighbor_mp.set_color(sampled_color)
             kf_modified = True
           unmatched_indices.discard(kf_idx)
           touched_neighbors.add(neighbor.id)
@@ -640,7 +665,8 @@ class Front_End:
           continue
 
         descriptor = kf.descriptors[kf_idx]
-        mp = MapPoint(position=point_3d, descriptor=descriptor)
+        sampled_color = self._sample_keypoint_color(kf.image, kf.keypoints[kf_idx])
+        mp = MapPoint(position=point_3d, descriptor=descriptor, color=sampled_color)
         neighbor.add_map_point(mp, neighbor_idx)
         kf.add_map_point(mp, kf_idx)
         self.map.add_map_point(mp)

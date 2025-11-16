@@ -258,25 +258,26 @@ class RerunSLAMVisualizer:
         if len(map_points) == 0:
             return
         
-        # Extract 3D positions
-        positions = np.array([mp.position for mp in map_points])
+        positions = []
+        colors = []
+        for mp in map_points:
+            positions.append(mp.position)
+            color = mp.get_color() if hasattr(mp, "get_color") else None
+            if color is None:
+                colors.append(np.array([0, 255, 0, 255], dtype=np.uint8))
+            else:
+                rgb = color.astype(np.uint8)
+                colors.append(np.array([rgb[0], rgb[1], rgb[2], 255], dtype=np.uint8))
         
-        # Color by observation count (more observations = brighter)
-        observation_counts = np.array([len(mp.observations) for mp in map_points])
-        max_obs = max(observation_counts) if len(observation_counts) > 0 else 1
-        
-        # Normalize to [0, 1] and create color gradient (dark green to bright green)
-        normalized_obs = observation_counts / max(max_obs, 1)
-        colors = np.zeros((len(map_points), 4), dtype=np.uint8)
-        colors[:, 1] = (50 + 205 * normalized_obs).astype(np.uint8)  # Green channel
-        colors[:, 3] = 255  # Alpha
+        positions_array = np.array(positions)
+        colors_array = np.stack(colors) if len(colors) > 0 else None
         
         rr.log(
             "world/map_points",
             rr.Points3D(
-                positions,
+                positions_array,
                 radii=0.03,
-                colors=colors,
+                colors=colors_array,
             )
         )
     

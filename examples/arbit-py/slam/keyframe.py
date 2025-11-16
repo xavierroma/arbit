@@ -107,6 +107,17 @@ class KeyFrame:
         """
         return [mp for mp in self.map_points if mp is not None and not mp.is_bad]
     
+    def get_descriptor_map_point_pairs(self) -> List[Tuple[np.ndarray, MapPoint]]:
+        """Return list of (descriptor, map_point) pairs for valid associations."""
+        pairs: List[Tuple[np.ndarray, MapPoint]] = []
+        for idx, mp in enumerate(self.map_points):
+            if mp is None or mp.is_bad:
+                continue
+            if idx >= len(self.descriptors):
+                continue
+            pairs.append((self.descriptors[idx].copy(), mp))
+        return pairs
+    
     def get_n_matches(self) -> int:
         """Count how many keypoints have associated map points.
         

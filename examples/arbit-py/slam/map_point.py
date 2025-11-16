@@ -1,5 +1,5 @@
 """MapPoint - 3D Point in World."""
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
@@ -22,6 +22,7 @@ class MapPoint:
     def __init__(self, 
     position: np.ndarray, 
     descriptor: Optional[np.ndarray] = None,
+    color: Optional[np.ndarray] = None,
     ):
         """Initialize a MapPoint.
         
@@ -36,12 +37,14 @@ class MapPoint:
         
         # Observations (bidirectional with KeyFrame)
         self.observations: Dict[int, int] = {}  # {keyframe_id: keypoint_index}
+        self.observation_descriptors: Dict[int, np.ndarray] = {}
         self.descriptors: List[np.ndarray] = []  # All descriptors from observations
         
         if descriptor is not None:
             self.descriptors.append(descriptor.copy())
         
         self.descriptor: Optional[np.ndarray] = None  # Best representative descriptor
+        self.color: Optional[np.ndarray] = color.copy() if color is not None else None
         
         # Quality tracking
         self.n_visible: int = 0  # How many times should be visible
@@ -67,8 +70,11 @@ class MapPoint:
         already_observing = keyframe_id in self.observations
         self.observations[keyframe_id] = keypoint_idx
         
-        if descriptor is not None and not already_observing:
-            self.descriptors.append(descriptor.copy())
+        if descriptor is not None:
+            descriptor_copy = descriptor.copy()
+            self.observation_descriptors[keyframe_id] = descriptor_copy
+            if not already_observing:
+                self.descriptors.append(descriptor_copy)
         
         # Recompute distinctive descriptor if we have descriptors
         if len(self.descriptors) > 0:
@@ -82,6 +88,8 @@ class MapPoint:
         """
         if keyframe_id in self.observations:
             del self.observations[keyframe_id]
+        if keyframe_id in self.observation_descriptors:
+            del self.observation_descriptors[keyframe_id]
             # Note: We don't remove descriptors as we don't track which descriptor
             # came from which observation. This is acceptable as descriptors are
             # used for matching and having extra ones doesn't hurt.
@@ -238,7 +246,36 @@ class MapPoint:
         """Mark as bad and cleanup."""
         self.is_bad = True
         self.observations.clear()
+        self.observation_descriptors.clear()
         # Keep descriptors and position for potential recovery
+
+    # === Color & Descriptor Accessors ===
+    
+    def set_color(self, color: np.ndarray) -> None:
+        """Set stored RGB color for visualization."""
+        self.color = color.copy()
+    
+    def get_color(self) -> Optional[np.ndarray]:
+        """Return stored RGB color if available."""
+        if self.color is None:
+            return None
+        return self.color.copy()
+    
+    def get_descriptor_for_keyframe(self, keyframe_id: int) -> Optional[np.ndarray]:
+        """Return descriptor observed from the given keyframe, if any."""
+        descriptor = self.observation_descriptors.get(keyframe_id)
+        if descriptor is None:
+            return None
+        return descriptor.copy()
+    
+    def get_observation_records(self) -> List[Tuple[int, int, Optional[np.ndarray]]]:
+        """Return list of (keyframe_id, keypoint_idx, descriptor) tuples."""
+        records: List[Tuple[int, int, Optional[np.ndarray]]] = []
+        for kf_id, kp_idx in self.observations.items():
+            descriptor = self.observation_descriptors.get(kf_id)
+            descriptor_copy = descriptor.copy() if descriptor is not None else None
+            records.append((kf_id, kp_idx, descriptor_copy))
+        return records
     
     def __repr__(self) -> str:
         """String representation of MapPoint."""
