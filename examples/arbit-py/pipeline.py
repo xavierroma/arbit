@@ -366,13 +366,23 @@ class Front_End:
       print("ERROR: detectAndCompute returned None")
       return
     map_pts = self.map.get_all_map_points()
-    map_descriptors = np.array([mp.get_reference_descriptor() for mp in map_pts])
+    descriptor_entries = [
+      (mp, desc)
+      for mp in map_pts
+      if (desc := mp.get_reference_descriptor()) is not None
+    ]
+    if len(descriptor_entries) == 0:
+      print("Tracking skipped: no map point descriptors available")
+      return
+
+    matchable_map_pts, map_descriptors = zip(*descriptor_entries)
+    map_descriptors = np.asarray(map_descriptors, dtype=np.uint8)
     matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
     matches = matcher.match(map_descriptors, descriptors)
     matches = sorted(matches, key=lambda x: x.distance)
     matches = matches[:10]
 
-    matches_map_pts = np.array([map_pts[m.queryIdx] for m in matches])
+    matches_map_pts = [matchable_map_pts[m.queryIdx] for m in matches]
     world_points = np.array([mp.position for mp in matches_map_pts])
     image_points = np.array([keypoints[m.trainIdx].pt for m in matches])
     
