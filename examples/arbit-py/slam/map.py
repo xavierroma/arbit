@@ -1,4 +1,5 @@
 """Map - Central Database for SLAM."""
+import random
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 from .keyframe import KeyFrame
@@ -29,6 +30,10 @@ class Map:
     
     # === KeyFrame Management ===
     
+    def should_add_keyframe(self, keyframe: KeyFrame) -> bool:
+        """Check if keyframe should be added to map."""
+        return random.random() < 0.1
+
     def add_keyframe(self, keyframe: KeyFrame) -> None:
         """Add keyframe to map.
         

@@ -19,7 +19,10 @@ class MapPoint:
     
     _next_id = 0
     
-    def __init__(self, position: np.ndarray, descriptor: Optional[np.ndarray] = None):
+    def __init__(self, 
+    position: np.ndarray, 
+    descriptor: Optional[np.ndarray] = None,
+    ):
         """Initialize a MapPoint.
         
         Args:
@@ -29,7 +32,7 @@ class MapPoint:
         self.id = MapPoint._next_id
         MapPoint._next_id += 1
         
-        self.position = position.copy()  # 3D [x, y, z] in world frame
+        self.position: np.ndarray = position.copy()  # 3D [x, y, z] in world frame
         
         # Observations (bidirectional with KeyFrame)
         self.observations: Dict[int, int] = {}  # {keyframe_id: keypoint_index}

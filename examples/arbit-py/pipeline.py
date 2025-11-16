@@ -1,4 +1,5 @@
 from collections import namedtuple
+from typing import List
 import cv2
 import numpy as np
 from eth3_utils import load_case
@@ -7,6 +8,7 @@ from enum import Enum, auto
 from visualizer import visualize_frontend
 
 from slam import CameraMatrix, Map, KeyFrame, MapPoint, to_matrix
+from video_utils import IphoneCameraInstrinsics
 
 class PipelineState(Enum):
     PRE_INIT = auto()
@@ -15,12 +17,12 @@ class PipelineState(Enum):
 
 
 class Front_End:
-  def __init__(self, camera_matrix: CameraMatrix):
+  def __init__(self, camera_matrix: CameraMatrix, scale: float =500.0):
     self.orb = cv2.ORB.create(2000)
     self.state: PipelineState = PipelineState.PRE_INIT
     
     self.camera_matrix = to_matrix(camera_matrix)
-    
+    self.scale = scale
     self.map = Map()
     
     self.prev_frame: np.ndarray | None = None
@@ -43,7 +45,7 @@ class Front_End:
   def pre_init(self, image: np.ndarray):
     """Store first frame and extract features."""
     self.prev_frame = image
-    self.prev_keypoints, self.prev_descriptors = self.orb.detectAndCompute(image, None)
+    self.prev_keypoints, self.prev_descriptors = self.orb.detectAndCompute(image, None)  # type: ignore
     n_keypoints = len(self.prev_keypoints) if self.prev_keypoints is not None else 0
     print(f"PRE_INIT: Detected {n_keypoints} keypoints in first frame")
     self.state = PipelineState.INIT
@@ -106,50 +108,50 @@ class Front_End:
     
     return float(score), inliers
 
-  def triangulate_points(self, points0: np.ndarray, points1: np.ndarray, 
-                         R: np.ndarray, t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+  def triangulate_points(
+    self,
+    points0: np.ndarray,
+    points1: np.ndarray,
+    P0: np.ndarray,
+    P1: np.ndarray,
+  ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Triangulate 3D points from two views.
+    Triangulate 3D points from two projection matrices.
     Returns 3D points in world frame and mask of valid points.
     """
-    # Projection matrices: P0 = K[I|0], P1 = K[R|t]
-    P0 = self.camera_matrix @ np.hstack([np.eye(3), np.zeros((3, 1))])
-    P1 = self.camera_matrix @ np.hstack([R, t])
-    
-    # Triangulate
+    if len(points0) == 0 or len(points1) == 0:
+      return np.empty((0, 3)), np.empty((0,), dtype=bool)
+
     points_4d = cv2.triangulatePoints(P0, P1, points0.T, points1.T)
     points_3d = (points_4d[:3, :] / points_4d[3, :]).T
-    
-    # Filter by positive depth in both cameras
-    # Camera 0 (identity): just check Z > 0
-    depth0 = points_3d[:, 2]
-    
-    # Camera 1: transform to camera 1 frame
-    points_3d_cam1 = (R @ points_3d.T + t).T
-    depth1 = points_3d_cam1[:, 2]
-    
-    # Keep only points with positive depth in both views and reasonable depth
-    max_depth = 100.0  # Reasonable for most scenes
+
+    K_inv = np.linalg.inv(self.camera_matrix)
+    Rt0 = K_inv @ P0
+    Rt1 = K_inv @ P1
+    R0, t0 = Rt0[:, :3], Rt0[:, 3:]
+    R1, t1 = Rt1[:, :3], Rt1[:, 3:]
+
+    points_cam0 = (R0 @ points_3d.T + t0).T
+    points_cam1 = (R1 @ points_3d.T + t1).T
+
+    depth0 = points_cam0[:, 2]
+    depth1 = points_cam1[:, 2]
+    max_depth = 100.0
     valid_depth = (depth0 > 0) & (depth1 > 0) & (depth0 < max_depth) & (depth1 < max_depth)
-    
-    # Also filter by reprojection error
+
     points_3d_h = np.hstack([points_3d, np.ones((len(points_3d), 1))])
-    
-    # Reproject to both cameras
     proj0 = (P0 @ points_3d_h.T).T
     proj0 = proj0[:, :2] / proj0[:, 2:3]
-    reproj_error0 = np.sum((points0 - proj0) ** 2, axis=1)
-    
     proj1 = (P1 @ points_3d_h.T).T
     proj1 = proj1[:, :2] / proj1[:, 2:3]
+
+    reproj_error0 = np.sum((points0 - proj0) ** 2, axis=1)
     reproj_error1 = np.sum((points1 - proj1) ** 2, axis=1)
-    
-    reproj_threshold = 5.991  # Chi-square threshold
+    reproj_threshold = 5.991
     valid_reproj = (reproj_error0 < reproj_threshold) & (reproj_error1 < reproj_threshold)
-    
-    valid_mask = valid_depth & valid_reproj
-    
-    return points_3d, valid_mask
+
+    valid_mask = valid_depth & valid_reproj & np.isfinite(points_3d).all(axis=1)
+    return points_3d * self.scale, valid_mask
 
   def init(self, image: np.ndarray):
     assert self.prev_frame is not None, "prev_frame must be set before init"
@@ -232,7 +234,11 @@ class Front_End:
         t_test = ts[i].reshape(3, 1)
         
         # Triangulate and count points with positive depth
-        points_3d, valid_mask = self.triangulate_points(points0_inliers, points1_inliers, R_test, t_test)
+
+        # Projection matrices: P0 = K[I|0], P1 = K[R|t]
+        P0 = self.camera_matrix @ np.hstack([np.eye(3), np.zeros((3, 1))])
+        P1 = self.camera_matrix @ np.hstack([R_test, t_test])
+        points_3d, valid_mask = self.triangulate_points(points0_inliers, points1_inliers, P0, P1)
         num_infront = np.sum(valid_mask)
         
         if num_infront > best_num_infront:
@@ -269,7 +275,9 @@ class Front_End:
       print(f"recoverPose: {np.sum(mask_pose_bool)} points passed cheirality check")
       
       # Triangulate all inliers
-      points_3d, valid_mask = self.triangulate_points(points0_inliers, points1_inliers, R, t)
+      P0 = self.camera_matrix @ np.hstack([np.eye(3), np.zeros((3, 1))])
+      P1 = self.camera_matrix @ np.hstack([R, t])
+      points_3d, valid_mask = self.triangulate_points(points0_inliers, points1_inliers, P0, P1)
     
     # ========================================
     # Create Map Structure (KeyFrames + MapPoints)
@@ -305,40 +313,29 @@ class Front_End:
       keypoints=keypoints1,
       descriptors=descriptors1
     )
+    print(f"pose_kf1: {pose_kf1}")
     
     # Create MapPoints and link to KeyFrames
     n_valid = np.sum(valid_mask)
     map_point_ids = []
-    
+
+    self.map.add_keyframe(kf0)
+    self.map.add_keyframe(kf1)
+    self.current_keyframe = kf1
+
     for i, (is_valid, point_3d) in enumerate(zip(valid_mask, points_3d)):
       if not is_valid:
         continue
-      
-      # Get the match index for this inlier
       match_idx = match_indices[i]
       match = matches[match_idx]
-      kp0_idx = match.queryIdx  # Index in keypoints0
-      kp1_idx = match.trainIdx  # Index in keypoints1
+      kp0_idx, kp1_idx = match.queryIdx, match.trainIdx
       
-      # Create MapPoint WITHOUT initial descriptor to avoid duplication bug
       mp = MapPoint(position=point_3d)
-      
-      # Add to Map first
-      self.map.add_map_point(mp)
-      map_point_ids.append(mp.id)
-      
-      # Link to KeyFrames (this will add descriptors)
-      # TODO: simplify interface between KeyFrame and MapPoint; MapPoint is always created in the same way
       kf0.add_map_point(mp, kp0_idx)
       kf1.add_map_point(mp, kp1_idx)
-    
-    # Add KeyFrames to Map
-    self.map.add_keyframe(kf0)
-    self.map.add_keyframe(kf1)
-    
-    # Set current keyframe for tracking
-    self.current_keyframe = kf1
-    
+      self.map.add_map_point(mp)
+      map_point_ids.append(mp.id)
+
     # Print statistics
     print(f"\n{'='*60}")
     print(f"Initialization successful!")
@@ -356,7 +353,6 @@ class Front_End:
     
     self.state = PipelineState.INITIALISED
 
-
   def initialised(self, image: np.ndarray):
     """Process frames after initialization (tracking state)."""
     # TODO: Implement tracking against local map
@@ -365,6 +361,211 @@ class Front_End:
     # 3. Estimate pose via PnP
     # 4. Decide if new keyframe needed
     # 5. Local mapping / BA
+    mask = np.ones((image.shape[0], image.shape[1]), dtype=bool)
+    keypoints, descriptors = self.orb.detectAndCompute(image, None)  # type: ignore  # pyright: ignore[reportGeneralTypeIssues]
+    if keypoints is None or descriptors is None:
+      print("ERROR: detectAndCompute returned None")
+      return
+    map_pts = self.map.get_all_map_points()
+    map_descriptors = np.array([mp.get_reference_descriptor() for mp in map_pts])
+    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    matches = matcher.match(map_descriptors, descriptors)
+    matches = sorted(matches, key=lambda x: x.distance)
+    matches = matches[:10]
+
+    matches_map_pts = np.array([map_pts[m.queryIdx] for m in matches])
+    world_points = np.array([mp.position for mp in matches_map_pts])
+    image_points = np.array([keypoints[m.trainIdx].pt for m in matches])
+    
+    success, rvec, tvec = cv2.solvePnP(world_points, image_points, self.camera_matrix, np.zeros((4, 1)), flags=cv2.SOLVEPNP_ITERATIVE)
+    if not success:
+      return
+
+    rvec, tvec = cv2.solvePnPRefineLM(world_points, image_points, self.camera_matrix, np.zeros((4, 1)), rvec, tvec)
+
+    R_mat, _ = cv2.Rodrigues(rvec)
+    T_w_to_c = np.hstack((R_mat, tvec))
+    R_c_to_w = R_mat.T
+    t_c_to_w = -R_c_to_w @ tvec.ravel()
+    T_c_to_w = np.eye(4)
+    T_c_to_w[:3, :3] = R_c_to_w
+    T_c_to_w[:3, 3:] = t_c_to_w.reshape(3, 1)
+    print(f"pose_kf: {T_c_to_w}")
+    kf = KeyFrame(
+      image=image,
+      camera_matrix=self.camera_matrix,
+      pose_c_to_w=T_c_to_w,
+      keypoints=keypoints,
+      descriptors=descriptors
+    )
+    if self.map.should_add_keyframe(kf):
+      self.map.add_keyframe(kf)
+      self.current_keyframe = kf
+      # Grow the map
+      self.grow_map(kf)
+
+      # Bundle Adjustment
+      self.bundle_adjustment()
+    else:
+      print("Keyframe not added to map")
+    
+  def grow_map(self, kf: KeyFrame):
+    """Grow the map by fusing observations and triangulating new points."""
+    unmatched_indices = {idx for idx, mp in enumerate(kf.map_points) if mp is None}
+    if not unmatched_indices:
+      return
+
+    local_keyframes = self.map.get_local_keyframes(kf, 10)
+    matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
+
+    for neighbor in local_keyframes:
+      if neighbor.id == kf.id:
+        continue
+
+      neighbor_descriptors = neighbor.descriptors
+      if neighbor_descriptors is None or len(neighbor_descriptors) == 0:
+        continue
+
+      candidate_indices = sorted(unmatched_indices)
+      if not candidate_indices:
+        break
+
+      candidate_descriptors = kf.descriptors[candidate_indices]
+      if candidate_descriptors is None or len(candidate_descriptors) == 0:
+        break
+
+      knn_matches = matcher.knnMatch(neighbor_descriptors, candidate_descriptors, k=2)
+      triangulation_pairs: list[tuple[int, int]] = []
+
+      for match_pair in knn_matches:
+        if len(match_pair) < 2:
+          continue
+        m, n = match_pair
+        if m.distance >= 0.75 * n.distance:
+          continue
+
+        neighbor_idx = m.queryIdx
+        candidate_offset = m.trainIdx
+        if candidate_offset >= len(candidate_indices):
+          continue
+        kf_idx = candidate_indices[candidate_offset]
+        if kf_idx not in unmatched_indices:
+          continue
+
+        if neighbor_idx >= len(neighbor.map_points):
+          continue
+
+        neighbor_mp = neighbor.map_points[neighbor_idx]
+        if neighbor_mp is not None and not neighbor_mp.is_bad:
+          if not neighbor_mp.is_in_keyframe(kf.id):
+            kf.add_map_point(neighbor_mp, kf_idx)
+          unmatched_indices.discard(kf_idx)
+          continue
+
+        triangulation_pairs.append((neighbor_idx, kf_idx))
+
+      if not triangulation_pairs:
+        continue
+
+      new_points = self._triangulate_candidate_pairs(neighbor, kf, triangulation_pairs)
+      for point_3d, neighbor_idx, kf_idx in new_points:
+        if kf_idx not in unmatched_indices:
+          continue
+
+        descriptor = kf.descriptors[kf_idx]
+        mp = MapPoint(position=point_3d, descriptor=descriptor)
+        neighbor.add_map_point(mp, neighbor_idx)
+        kf.add_map_point(mp, kf_idx)
+        self.map.add_map_point(mp)
+        unmatched_indices.discard(kf_idx)
+
+      if not unmatched_indices:
+        break
+
+  def _triangulate_candidate_pairs(
+    self,
+    neighbor: KeyFrame,
+    current_kf: KeyFrame,
+    index_pairs: list[tuple[int, int]]
+  ) -> list[tuple[np.ndarray, int, int]]:
+    """Triangulate candidate feature correspondences between two keyframes."""
+    if len(index_pairs) == 0:
+      return []
+
+    unique_pairs = []
+    seen_pairs = set()
+    for neighbor_idx, current_idx in index_pairs:
+      key = (neighbor_idx, current_idx)
+      if key in seen_pairs:
+        continue
+      seen_pairs.add(key)
+      unique_pairs.append((neighbor_idx, current_idx))
+
+    if len(unique_pairs) == 0:
+      return []
+
+    pts_neighbor = np.array([neighbor.keypoints[i].pt for i, _ in unique_pairs], dtype=np.float32)
+    pts_current = np.array([current_kf.keypoints[j].pt for _, j in unique_pairs], dtype=np.float32)
+
+    pose_neighbor_w_to_c = neighbor.get_pose_w_to_c()
+    pose_current_w_to_c = current_kf.get_pose_w_to_c()
+
+    P0 = self.camera_matrix @ pose_neighbor_w_to_c[:3, :]
+    P1 = self.camera_matrix @ pose_current_w_to_c[:3, :]
+
+    points_4d = cv2.triangulatePoints(P0, P1, pts_neighbor.T, pts_current.T)
+    points_3d = (points_4d[:3, :] / points_4d[3, :]).T
+
+    valid_points: list[tuple[np.ndarray, int, int]] = []
+
+    max_reproj_error = 3.0
+    min_parallax_rad = np.deg2rad(1.0)
+    cos_min_parallax = np.cos(min_parallax_rad)
+
+    for (neighbor_idx, current_idx), point_3d, pt_neighbor, pt_current in zip(
+      unique_pairs, points_3d, pts_neighbor, pts_current
+    ):
+      point_h = np.hstack([point_3d, 1.0])
+
+      cam_neighbor = pose_neighbor_w_to_c @ point_h
+      cam_current = pose_current_w_to_c @ point_h
+      depth_neighbor = cam_neighbor[2]
+      depth_current = cam_current[2]
+
+      if depth_neighbor <= 0 or depth_current <= 0:
+        continue
+
+      proj_neighbor = P0 @ point_h
+      proj_neighbor = proj_neighbor[:2] / proj_neighbor[2]
+      proj_current = P1 @ point_h
+      proj_current = proj_current[:2] / proj_current[2]
+
+      err_neighbor = np.linalg.norm(pt_neighbor - proj_neighbor)
+      err_current = np.linalg.norm(pt_current - proj_current)
+      if err_neighbor > max_reproj_error or err_current > max_reproj_error:
+        continue
+
+      dir_neighbor = cam_neighbor[:3]
+      dir_current = cam_current[:3]
+      norm_neighbor = np.linalg.norm(dir_neighbor)
+      norm_current = np.linalg.norm(dir_current)
+      if norm_neighbor < 1e-6 or norm_current < 1e-6:
+        continue
+
+      cos_parallax = np.dot(dir_neighbor / norm_neighbor, dir_current / norm_current)
+      if cos_parallax > cos_min_parallax:
+        continue
+
+      if not np.all(np.isfinite(point_3d)):
+        continue
+
+      valid_points.append((point_3d, neighbor_idx, current_idx))
+
+    return valid_points
+
+
+  def bundle_adjustment(self):
+    """Bundle Adjustment"""
     pass
   
   def get_map_statistics(self):
@@ -390,42 +591,64 @@ class Front_End:
     return stats
 
 if __name__ == "__main__":
-  case = load_case(Path('data/two-view/exa'))
-  front_end = Front_End(CameraMatrix(cx=case.calib.cam0[0][2], cy=case.calib.cam0[1][2], fx=case.calib.cam0[0][0], fy=case.calib.cam0[1][1]))
+  import argparse
   
-  # Process images
-  for im in [case.im0, case.im1]:
-    front_end.ingest_image(cv2.imread(im, cv2.IMREAD_GRAYSCALE))
+  parser = argparse.ArgumentParser(description="SLAM Pipeline with visualization options")
+  parser.add_argument("--video", type=str, default="data/office.MOV", help="Path to input video")
+  parser.add_argument("--visualizer", type=str, choices=["matplotlib", "rerun"], default="matplotlib",
+                      help="Visualization backend: 'matplotlib' (static) or 'rerun' (real-time)")
+  parser.add_argument("--max-frames", type=int, default=None, help="Maximum number of frames to process")
+  args = parser.parse_args()
   
-  # Get and print map statistics
-  stats = front_end.get_map_statistics()
-  
-  print("\n--- Map Statistics ---")
-  print(f"KeyFrames: {stats['n_keyframes']}")
-  print(f"MapPoints: {stats['n_map_points']}")
-  print(f"Initialization method: {stats['init_method']}")
-  
-  if stats['n_map_points'] > 0:
-    print(f"Mean depth: {stats['mean_depth']:.3f}")
-    print(f"Std depth: {stats['std_depth']:.3f}")
-    print(f"Min/Max depth: [{stats['min_depth']:.3f}, {stats['max_depth']:.3f}]")
+  if args.visualizer == "rerun":
+    # Use Rerun for real-time visualization
+    from rerun_visualizer import visualize_pipeline_with_rerun
+    visualize_pipeline_with_rerun(args.video, IphoneCameraInstrinsics, max_frames=args.max_frames)
   else:
-    print("No map points triangulated")
-  
-  # Print covisibility information
-  print("\n--- Covisibility Graph ---")
-  for kf in front_end.map.get_all_keyframes():
-    print(f"{kf}")
-    if kf.parent:
-      print(f"  Parent: KeyFrame {kf.parent.id}")
-  
-  print("\n" + "="*60)
-  
-  # Visualize the 3D map and camera poses
-  print("\nGenerating 3D visualization...")
-  visualize_frontend(
-    front_end, 
-    title="ORB-SLAM Initialization Result",
-    save_path="slam_visualization.png"
-  )
+    # Use matplotlib for static visualization (original behavior)
+    video_path = args.video
+    cap = cv2.VideoCapture(video_path)
+    assert cap.isOpened(), f"Unable to open video: {video_path}"
+
+    front_end = Front_End(IphoneCameraInstrinsics)
+
+    while True:
+      ret, frame = cap.read()
+      if not ret:
+        break
+      gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+      front_end.ingest_image(gray)
+    cap.release()
+    
+    # Get and print map statistics
+    stats = front_end.get_map_statistics()
+    
+    print("\n--- Map Statistics ---")
+    print(f"KeyFrames: {stats['n_keyframes']}")
+    print(f"MapPoints: {stats['n_map_points']}")
+    print(f"Initialization method: {stats['init_method']}")
+    
+    if stats['n_map_points'] > 0:
+      print(f"Mean depth: {stats['mean_depth']:.3f}")
+      print(f"Std depth: {stats['std_depth']:.3f}")
+      print(f"Min/Max depth: [{stats['min_depth']:.3f}, {stats['max_depth']:.3f}]")
+    else:
+      print("No map points triangulated")
+    
+    # Print covisibility information
+    print("\n--- Covisibility Graph ---")
+    for kf in front_end.map.get_all_keyframes():
+      print(f"{kf}")
+      if kf.parent:
+        print(f"  Parent: KeyFrame {kf.parent.id}")
+    
+    print("\n" + "="*60)
+    
+    # Visualize the 3D map and camera poses
+    print("\nGenerating 3D visualization...")
+    visualize_frontend(
+      front_end, 
+      title="ORB-SLAM Initialization Result",
+      save_path="slam_visualization.png"
+    )
 

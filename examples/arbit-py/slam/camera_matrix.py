@@ -20,3 +20,13 @@ def to_matrix(camera_matrix: CameraMatrix) -> np.ndarray:
         [0, 0, 1]
     ])
 
+def from_intrinsics(intrinsics: np.ndarray) -> CameraMatrix:
+    """Convert intrinsics to CameraMatrix.
+    
+    Args:
+        intrinsics: 3x3 numpy array of intrinsics
+        
+    Returns:
+        CameraMatrix
+    """
+    return CameraMatrix(cx=intrinsics[0][2], cy=intrinsics[1][2], fx=intrinsics[0][0], fy=intrinsics[1][1])
