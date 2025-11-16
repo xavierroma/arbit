@@ -435,6 +435,8 @@ class Front_End:
 
     local_keyframes = self.map.get_local_keyframes(kf, 10)
     matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
+    touched_neighbors: set[int] = set()
+    kf_modified = False
 
     for neighbor in local_keyframes:
       if neighbor.id == kf.id:
@@ -477,7 +479,9 @@ class Front_End:
         if neighbor_mp is not None and not neighbor_mp.is_bad:
           if not neighbor_mp.is_in_keyframe(kf.id):
             kf.add_map_point(neighbor_mp, kf_idx)
+            kf_modified = True
           unmatched_indices.discard(kf_idx)
+          touched_neighbors.add(neighbor.id)
           continue
 
         triangulation_pairs.append((neighbor_idx, kf_idx))
@@ -496,9 +500,18 @@ class Front_End:
         kf.add_map_point(mp, kf_idx)
         self.map.add_map_point(mp)
         unmatched_indices.discard(kf_idx)
+        touched_neighbors.add(neighbor.id)
+        kf_modified = True
 
       if not unmatched_indices:
         break
+
+    if kf_modified:
+      kf.update_connections(self.map.keyframes)
+    for neighbor_id in touched_neighbors:
+      neighbor = self.map.get_keyframe(neighbor_id)
+      if neighbor is not None and not neighbor.is_bad:
+        neighbor.update_connections(self.map.keyframes)
 
   def _triangulate_candidate_pairs(
     self,
