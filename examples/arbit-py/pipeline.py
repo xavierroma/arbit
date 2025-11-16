@@ -24,6 +24,15 @@ class Front_End:
     self.camera_matrix = to_matrix(camera_matrix)
     self.map = Map()
     self.tracking_pose: np.ndarray | None = None
+    self.motion_velocity: np.ndarray | None = None
+    self.frames_since_last_keyframe: int = 0
+    self.last_keyframe_pose: np.ndarray | None = None
+    self.min_frames_between_keyframes = 12
+    self.max_frames_between_keyframes = 60
+    self.translation_threshold = 0.1
+    self.rotation_threshold = np.deg2rad(10.0)
+    self.guided_search_radius = 8.0
+    self.min_tracked_points_for_keyframe = 40
     
     self.prev_frame: np.ndarray | None = None
     self.prev_keypoints: list | None = None
@@ -107,6 +116,115 @@ class Front_End:
     score = np.sum(inliers)
     
     return float(score), inliers
+
+  def _predict_pose(self) -> np.ndarray | None:
+    if self.tracking_pose is None:
+      return None
+    if self.motion_velocity is None:
+      return self.tracking_pose.copy()
+    return (self.motion_velocity @ self.tracking_pose).copy()
+
+  def _update_motion_model(self, new_pose: np.ndarray) -> None:
+    if self.tracking_pose is not None:
+      prev_pose_inv = np.linalg.inv(self.tracking_pose)
+      self.motion_velocity = new_pose @ prev_pose_inv
+    else:
+      self.motion_velocity = None
+    self.tracking_pose = new_pose.copy()
+
+  def _project_point_from_pose(self, pose_w_to_c: np.ndarray, point_3d: np.ndarray) -> np.ndarray | None:
+    point_h = np.append(point_3d, 1.0)
+    point_cam = pose_w_to_c @ point_h
+    if point_cam[2] <= 0:
+      return None
+    projected = self.camera_matrix @ point_cam[:3]
+    if np.abs(projected[2]) < 1e-6:
+      return None
+    return projected[:2] / projected[2]
+
+  def _within_distance_range(self, map_point: MapPoint, camera_center: np.ndarray) -> bool:
+    if map_point.min_distance == 0.0 and map_point.max_distance == 0.0:
+      return True
+    distance = np.linalg.norm(map_point.position - camera_center)
+    min_dist = map_point.min_distance * 0.8 if map_point.min_distance > 0 else 0.0
+    max_dist = map_point.max_distance * 1.2 if map_point.max_distance > 0 else float('inf')
+    lower_ok = bool(distance >= min_dist)
+    upper_ok = bool(distance <= max_dist)
+    return lower_ok and upper_ok
+
+  def _collect_matchable_map_points(
+    self,
+    image_shape: tuple[int, int],
+    predicted_pose: np.ndarray | None
+  ) -> tuple[list[MapPoint], np.ndarray, list[np.ndarray | None]]:
+    height, width = image_shape
+    map_points = []
+    descriptors: list[np.ndarray] = []
+    projections: list[np.ndarray | None] = []
+    if predicted_pose is not None:
+      pose_w_to_c = np.linalg.inv(predicted_pose)
+      camera_center = predicted_pose[:3, 3]
+    else:
+      pose_w_to_c = None
+      camera_center = None
+    for mp in self.map.get_all_map_points():
+      descriptor = mp.get_reference_descriptor()
+      if descriptor is None:
+        continue
+      proj = None
+      if pose_w_to_c is not None:
+        proj = self._project_point_from_pose(pose_w_to_c, mp.position)
+        if proj is None:
+          continue
+        if proj[0] < 0 or proj[0] >= width or proj[1] < 0 or proj[1] >= height:
+          continue
+        if camera_center is not None and not self._within_distance_range(mp, camera_center):
+          continue
+      map_points.append(mp)
+      descriptors.append(descriptor)
+      projections.append(proj)
+    descriptor_array = np.asarray(descriptors, dtype=np.uint8) if descriptors else np.empty((0, 32), dtype=np.uint8)
+    return map_points, descriptor_array, projections
+
+  def _build_keyframe_metrics(self, n_tracked: int, current_pose: np.ndarray) -> dict:
+    translation = 0.0
+    rotation = 0.0
+    if self.last_keyframe_pose is not None:
+      delta = current_pose @ np.linalg.inv(self.last_keyframe_pose)
+      translation = float(np.linalg.norm(delta[:3, 3]))
+      trace_value = np.clip((np.trace(delta[:3, :3]) - 1.0) * 0.5, -1.0, 1.0)
+      rotation = float(np.arccos(trace_value))
+    return {
+      "frames_since_last": self.frames_since_last_keyframe,
+      "min_interval": self.min_frames_between_keyframes,
+      "max_interval": self.max_frames_between_keyframes,
+      "n_matches": n_tracked,
+      "min_tracked": self.min_tracked_points_for_keyframe,
+      "translation": translation,
+      "rotation": rotation,
+      "translation_thresh": self.translation_threshold,
+      "rotation_thresh": self.rotation_threshold
+    }
+
+  def _should_insert_keyframe(self, metrics: dict) -> bool:
+    if self.last_keyframe_pose is None:
+      return True
+    frames_since_last = metrics.get("frames_since_last", 0)
+    min_interval = metrics.get("min_interval", 0)
+    max_interval = metrics.get("max_interval", float('inf'))
+    if frames_since_last < min_interval:
+      return False
+    if frames_since_last >= max_interval:
+      return True
+    translation = metrics.get("translation", 0.0)
+    rotation = metrics.get("rotation", 0.0)
+    translation_thresh = metrics.get("translation_thresh", 0.0)
+    rotation_thresh = metrics.get("rotation_thresh", 0.0)
+    if translation > translation_thresh or rotation > rotation_thresh:
+      n_matches = metrics.get("n_matches", 0)
+      min_tracked = metrics.get("min_tracked", 0)
+      return n_matches <= min_tracked
+    return False
 
   def triangulate_points(
     self,
@@ -322,7 +440,9 @@ class Front_End:
     self.map.add_keyframe(kf0)
     self.map.add_keyframe(kf1)
     self.current_keyframe = kf1
-    self.tracking_pose = pose_kf1.copy()
+    self._update_motion_model(pose_kf1)
+    self.last_keyframe_pose = pose_kf1.copy()
+    self.frames_since_last_keyframe = 0
 
     for i, (is_valid, point_3d) in enumerate(zip(valid_mask, points_3d)):
       if not is_valid:
@@ -367,29 +487,48 @@ class Front_End:
     if keypoints is None or descriptors is None:
       print("ERROR: detectAndCompute returned None")
       return
-    map_pts = self.map.get_all_map_points()
-    descriptor_entries = [
-      (mp, desc)
-      for mp in map_pts
-      if (desc := mp.get_reference_descriptor()) is not None
-    ]
-    if len(descriptor_entries) == 0:
-      print("Tracking skipped: no map point descriptors available")
+    self.frames_since_last_keyframe += 1
+
+    predicted_pose = self._predict_pose()
+    matchable_map_pts, map_descriptors, projections = self._collect_matchable_map_points(image.shape[:2], predicted_pose)
+    if len(matchable_map_pts) == 0 and predicted_pose is not None:
+      matchable_map_pts, map_descriptors, projections = self._collect_matchable_map_points(image.shape[:2], None)
+    if len(matchable_map_pts) == 0 or map_descriptors.size == 0:
+      print("Tracking skipped: no map points available for matching")
+      self.motion_velocity = None
       return
 
-    matchable_map_pts, map_descriptors = zip(*descriptor_entries)
-    map_descriptors = np.asarray(map_descriptors, dtype=np.uint8)
     matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
     matches = matcher.match(map_descriptors, descriptors)
     matches = sorted(matches, key=lambda x: x.distance)
-    matches = matches[:10]
 
-    matches_map_pts = [matchable_map_pts[m.queryIdx] for m in matches]
-    world_points = np.array([mp.position for mp in matches_map_pts])
-    image_points = np.array([keypoints[m.trainIdx].pt for m in matches])
+    filtered_matches: list[cv2.DMatch] = []
+    filtered_map_pts: list[MapPoint] = []
+    for match in matches:
+      mp = matchable_map_pts[match.queryIdx]
+      proj = projections[match.queryIdx]
+      if proj is not None:
+        kp = keypoints[match.trainIdx]
+        if np.hypot(kp.pt[0] - proj[0], kp.pt[1] - proj[1]) > self.guided_search_radius:
+          continue
+      filtered_matches.append(match)
+      filtered_map_pts.append(mp)
+      if len(filtered_matches) >= 100:
+        break
+
+    if len(filtered_matches) < 6:
+      print("Tracking skipped: insufficient guided matches")
+      self.motion_velocity = None
+      return
+
+    matches = filtered_matches
+    matches_map_pts = filtered_map_pts
+    world_points = np.array([mp.position for mp in matches_map_pts], dtype=np.float32)
+    image_points = np.array([keypoints[m.trainIdx].pt for m in matches], dtype=np.float32)
     
     success, rvec, tvec = cv2.solvePnP(world_points, image_points, self.camera_matrix, np.zeros((4, 1)), flags=cv2.SOLVEPNP_ITERATIVE)
     if not success:
+      self.motion_velocity = None
       return
 
     rvec, tvec = cv2.solvePnPRefineLM(world_points, image_points, self.camera_matrix, np.zeros((4, 1)), rvec, tvec)
@@ -402,7 +541,7 @@ class Front_End:
     T_c_to_w[:3, :3] = R_c_to_w
     T_c_to_w[:3, 3:] = t_c_to_w.reshape(3, 1)
     print(f"pose_kf: {T_c_to_w}")
-    self.tracking_pose = T_c_to_w.copy()
+    self._update_motion_model(T_c_to_w)
     kf = KeyFrame(
       image=image,
       camera_matrix=self.camera_matrix,
@@ -419,9 +558,12 @@ class Front_End:
         kf.add_map_point(mp, kp_idx)
       except ValueError:
         continue
-    if self.map.should_add_keyframe(kf):
+    keyframe_metrics = self._build_keyframe_metrics(len(matches), T_c_to_w)
+    if self._should_insert_keyframe(keyframe_metrics):
       self.map.add_keyframe(kf)
       self.current_keyframe = kf
+      self.last_keyframe_pose = T_c_to_w.copy()
+      self.frames_since_last_keyframe = 0
       # Grow the map
       self.grow_map(kf)
 
