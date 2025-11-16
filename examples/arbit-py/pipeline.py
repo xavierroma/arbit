@@ -398,6 +398,15 @@ class Front_End:
       keypoints=keypoints,
       descriptors=descriptors
     )
+
+    for match, mp in zip(matches, matches_map_pts):
+      if mp is None:
+        continue
+      kp_idx = match.trainIdx
+      try:
+        kf.add_map_point(mp, kp_idx)
+      except ValueError:
+        continue
     if self.map.should_add_keyframe(kf):
       self.map.add_keyframe(kf)
       self.current_keyframe = kf
