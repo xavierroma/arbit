@@ -23,6 +23,7 @@ class Front_End:
     
     self.camera_matrix = to_matrix(camera_matrix)
     self.map = Map()
+    self.tracking_pose: np.ndarray | None = None
     
     self.prev_frame: np.ndarray | None = None
     self.prev_keypoints: list | None = None
@@ -321,6 +322,7 @@ class Front_End:
     self.map.add_keyframe(kf0)
     self.map.add_keyframe(kf1)
     self.current_keyframe = kf1
+    self.tracking_pose = pose_kf1.copy()
 
     for i, (is_valid, point_3d) in enumerate(zip(valid_mask, points_3d)):
       if not is_valid:
@@ -400,6 +402,7 @@ class Front_End:
     T_c_to_w[:3, :3] = R_c_to_w
     T_c_to_w[:3, 3:] = t_c_to_w.reshape(3, 1)
     print(f"pose_kf: {T_c_to_w}")
+    self.tracking_pose = T_c_to_w.copy()
     kf = KeyFrame(
       image=image,
       camera_matrix=self.camera_matrix,
@@ -509,9 +512,9 @@ class Front_End:
     if kf_modified:
       kf.update_connections(self.map.keyframes)
     for neighbor_id in touched_neighbors:
-      neighbor = self.map.get_keyframe(neighbor_id)
-      if neighbor is not None and not neighbor.is_bad:
-        neighbor.update_connections(self.map.keyframes)
+      neighbor_kf: KeyFrame | None = self.map.get_keyframe(neighbor_id)
+      if neighbor_kf is not None and not neighbor_kf.is_bad:
+        neighbor_kf.update_connections(self.map.keyframes)
 
   def _triangulate_candidate_pairs(
     self,

@@ -485,16 +485,22 @@ def visualize_pipeline_with_rerun(video_path: str, camera_matrix, max_frames: Op
                     frame_id=frame_id
                 )
             
-            # Log current tracking pose if available
-            if front_end.current_keyframe is not None:
+            tracking_pose = getattr(front_end, "tracking_pose", None)
+            pose_w_to_c = None
+            if tracking_pose is not None:
+                try:
+                    pose_w_to_c = np.linalg.inv(tracking_pose)
+                except np.linalg.LinAlgError:
+                    pose_w_to_c = None
+            elif front_end.current_keyframe is not None:
                 pose_w_to_c = front_end.current_keyframe.get_pose_w_to_c()
+
+            if pose_w_to_c is not None:
                 R = pose_w_to_c[:3, :3]
                 t = pose_w_to_c[:3, 3]
-                C = -R.T @ t
                 
-                # Log current camera pose (different from keyframes)
                 viz.log_camera_pose(
-                    R, t, frame_id, "current_camera",
+                    R, t, frame_id, "tracking_camera",
                     image=gray,
                     camera_matrix=camera_matrix_np
                 )
