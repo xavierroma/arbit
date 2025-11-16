@@ -17,12 +17,11 @@ class PipelineState(Enum):
 
 
 class Front_End:
-  def __init__(self, camera_matrix: CameraMatrix, scale: float =500.0):
+  def __init__(self, camera_matrix: CameraMatrix):
     self.orb = cv2.ORB.create(2000)
     self.state: PipelineState = PipelineState.PRE_INIT
     
     self.camera_matrix = to_matrix(camera_matrix)
-    self.scale = scale
     self.map = Map()
     
     self.prev_frame: np.ndarray | None = None
@@ -151,7 +150,7 @@ class Front_End:
     valid_reproj = (reproj_error0 < reproj_threshold) & (reproj_error1 < reproj_threshold)
 
     valid_mask = valid_depth & valid_reproj & np.isfinite(points_3d).all(axis=1)
-    return points_3d * self.scale, valid_mask
+    return points_3d, valid_mask
 
   def init(self, image: np.ndarray):
     assert self.prev_frame is not None, "prev_frame must be set before init"
