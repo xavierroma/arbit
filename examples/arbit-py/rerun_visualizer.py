@@ -10,12 +10,13 @@ This visualizer provides real-time, interactive 3D visualization of:
 """
 
 import numpy as np
-import cv2
 import rerun as rr
-from typing import Optional
+from typing import Optional, Union
 from pathlib import Path
 
-from slam import Map, KeyFrame, MapPoint
+from frame_sources import FrameData, FrameSource, VideoFrameSource
+from pipeline import Front_End, PipelineState, run_frontend_on_stream
+from slam import Map, KeyFrame, MapPoint, to_matrix
 
 
 class RerunSLAMVisualizer:
@@ -420,119 +421,136 @@ class RerunSLAMVisualizer:
         rr.log("stats/initialization", rr.TextLog(info_text))
 
 
-def visualize_pipeline_with_rerun(video_path: str, camera_matrix, max_frames: Optional[int] = None):
+def visualize_pipeline_with_rerun(
+    frame_source: Union[FrameSource, str, Path],
+    camera_matrix=None,
+    max_frames: Optional[int] = None,
+    *,
+    front_end: Optional[Front_End] = None,
+    source_label: Optional[str] = None,
+):
     """
     Run the SLAM pipeline with real-time Rerun visualization.
     
     Args:
-        video_path: Path to input video
-        camera_matrix: Camera intrinsic matrix or CameraMatrix object
+        frame_source: FrameSource instance or path to an input video file
+        camera_matrix: Camera intrinsics (required if front_end is not provided)
         max_frames: Optional maximum number of frames to process
+        front_end: Optional existing Front_End instance
+        source_label: Optional label for the recording name
     """
-    from pipeline import Front_End, PipelineState
-    from slam import to_matrix
-    
-    # Initialize visualizer
-    viz = RerunSLAMVisualizer(recording_name=f"SLAM: {Path(video_path).name}")
-    
-    # Get camera matrix as numpy array
-    camera_matrix_np = to_matrix(camera_matrix)
-    
-    # Initialize pipeline
-    front_end = Front_End(camera_matrix)
-    
-    # Open video
-    cap = cv2.VideoCapture(video_path)
-    assert cap.isOpened(), f"Unable to open video: {video_path}"
-    
-    frame_id = 0
-    
+    if front_end is None and camera_matrix is None:
+        raise ValueError("Either front_end or camera_matrix must be provided.")
+
+    if isinstance(frame_source, (str, Path)):
+        input_path = Path(frame_source)
+        frame_source_obj: FrameSource = VideoFrameSource(input_path)
+        source_label = source_label or input_path.name
+    else:
+        frame_source_obj = frame_source
+        source_label = source_label or getattr(frame_source_obj, "label", "frame_source")
+
+    if front_end is None:
+        front_end = Front_End(camera_matrix)
+
+    camera_matrix_np = getattr(front_end, "camera_matrix", None)
+    if camera_matrix_np is None:
+        camera_matrix_np = to_matrix(camera_matrix)
+
+    viz = RerunSLAMVisualizer(recording_name=f"SLAM: {source_label}")
+
     print("Starting SLAM pipeline with Rerun visualization...")
     print("Rerun viewer should open automatically.")
     print("=" * 60)
-    
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        
-        # Convert to grayscale
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        
-        # Log the current frame image (separate from 3D cameras)
-        viz.log_frame(frame, frame_id, is_keyframe=False)
-        
-        # Process frame
-        prev_state = front_end.state
-        front_end.ingest_image(gray, frame)
-        
-        # Log features if available
-        if front_end.prev_keypoints is not None:
-            viz.log_features(front_end.prev_keypoints, frame_id)
-        
-        # Log map state if initialized
-        if front_end.state == PipelineState.INITIALISED:
-            viz.log_map(front_end.map, frame_id)
-            
-            # Log initialization info on first initialization
-            if prev_state != PipelineState.INITIALISED:
-                print(f"\n✓ SLAM Initialized at frame {frame_id}")
-                print(f"  Method: {front_end.init_method}")
+
+    initialization_logged = False
+
+    def on_frame(
+        frame: FrameData,
+        frontend: Front_End,
+        prev_state: PipelineState,
+        current_state: PipelineState,
+    ) -> None:
+        nonlocal initialization_logged
+        image = frame.color if frame.color is not None else frame.gray
+        viz.log_frame(image, frame.index, is_keyframe=False)
+
+        if frontend.prev_keypoints is not None:
+            viz.log_features(frontend.prev_keypoints, frame.index)
+
+        if current_state == PipelineState.INITIALISED:
+            viz.log_map(frontend.map, frame.index)
+
+            if not initialization_logged and prev_state != PipelineState.INITIALISED:
+                print(f"\n✓ SLAM Initialized at frame {frame.index}")
+                print(f"  Method: {frontend.init_method}")
                 viz.log_initialization_info(
-                    method=front_end.init_method,
-                    score_H=0.0,  # Would need to pass these from init()
+                    method=frontend.init_method,
+                    score_H=0.0,  # Placeholder until scores are surfaced
                     score_F=0.0,
                     R_H=0.0,
-                    frame_id=frame_id
+                    frame_id=frame.index,
                 )
-            
-            tracking_pose = getattr(front_end, "tracking_pose", None)
+                initialization_logged = True
+
+            tracking_pose = getattr(frontend, "tracking_pose", None)
             pose_w_to_c = None
             if tracking_pose is not None:
                 try:
                     pose_w_to_c = np.linalg.inv(tracking_pose)
                 except np.linalg.LinAlgError:
                     pose_w_to_c = None
-            elif front_end.current_keyframe is not None:
-                pose_w_to_c = front_end.current_keyframe.get_pose_w_to_c()
+            elif frontend.current_keyframe is not None:
+                pose_w_to_c = frontend.current_keyframe.get_pose_w_to_c()
 
             if pose_w_to_c is not None:
                 R = pose_w_to_c[:3, :3]
                 t = pose_w_to_c[:3, 3]
-                
                 viz.log_camera_pose(
-                    R, t, frame_id, "tracking_camera",
-                    image=frame,
-                    camera_matrix=camera_matrix_np
+                    R,
+                    t,
+                    frame.index,
+                    "tracking_camera",
+                    image=image,
+                    camera_matrix=camera_matrix_np,
                 )
-        
-        frame_id += 1
-        
-        # Progress indicator
-        if frame_id % 10 == 0:
-            state_str = front_end.state.name
-            n_kf = len(front_end.map.get_all_keyframes()) if front_end.state == PipelineState.INITIALISED else 0
-            n_mp = len(front_end.map.get_all_map_points()) if front_end.state == PipelineState.INITIALISED else 0
-            print(f"Frame {frame_id}: {state_str} | KF: {n_kf} | MP: {n_mp}", end="\r")
-        
-        # Limit processing if specified
-        if max_frames and frame_id >= max_frames:
-            print(f"\n\nReached max frames limit ({max_frames})")
-            break
-    
-    cap.release()
-    
-    print(f"\n\n{'='*60}")
-    print(f"Processed {frame_id} frames")
-    
+
+        if (frame.index + 1) % 10 == 0:
+            state_str = current_state.name
+            keyframes = (
+                len(frontend.map.get_all_keyframes())
+                if current_state == PipelineState.INITIALISED
+                else 0
+            )
+            map_points = (
+                len(frontend.map.get_all_map_points())
+                if current_state == PipelineState.INITIALISED
+                else 0
+            )
+            print(
+                f"Frame {frame.index + 1}: {state_str} | KF: {keyframes} | MP: {map_points}",
+                end="\r",
+            )
+
+    processed = run_frontend_on_stream(
+        front_end, frame_source_obj, max_frames=max_frames, on_frame=on_frame
+    )
+
+    print(f"\n\n{'=' * 60}")
+    print(f"Processed {processed} frames")
+
     if front_end.state == PipelineState.INITIALISED:
         stats = front_end.get_map_statistics()
-        print(f"Final map: {stats['n_keyframes']} keyframes, {stats['n_map_points']} map points")
-    
+        print(
+            f"Final map: {stats['n_keyframes']} keyframes, "
+            f"{stats['n_map_points']} map points"
+        )
+    else:
+        print("Front-end did not reach INITIALISED state.")
+
     print("Rerun visualization complete.")
     print("The Rerun viewer will remain open for exploration.")
-    
-    # Log completion
+
     rr.log("events/end", rr.TextLog("Pipeline complete"))
 
 

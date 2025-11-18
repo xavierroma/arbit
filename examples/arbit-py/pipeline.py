@@ -1,12 +1,11 @@
-from collections import namedtuple
-from typing import List, Optional
+from typing import Callable, Optional
 import cv2
 import numpy as np
-from eth3_utils import load_case
 from pathlib import Path
 from enum import Enum, auto
 from visualizer import visualize_frontend
 
+from frame_sources import FrameData, FrameSource, create_frame_source
 from slam import CameraMatrix, Map, KeyFrame, MapPoint, to_matrix
 from video_utils import IphoneCameraInstrinsics
 
@@ -800,40 +799,106 @@ class Front_End:
     
     return stats
 
+
+FrameCallback = Callable[[FrameData, "Front_End", PipelineState, PipelineState], None]
+
+
+def run_frontend_on_stream(
+  front_end: "Front_End",
+  frame_source: FrameSource,
+  max_frames: Optional[int] = None,
+  on_frame: Optional[FrameCallback] = None
+) -> int:
+  """Iterate over a frame source and feed frames into the SLAM front-end."""
+  processed = 0
+  for frame in frame_source:
+    prev_state = front_end.state
+    front_end.ingest_image(frame.gray, frame.color)
+    if on_frame is not None:
+      on_frame(frame, front_end, prev_state, front_end.state)
+    processed += 1
+    if max_frames is not None and processed >= max_frames:
+      break
+  return processed
+
+
+def parse_intrinsics_override(spec: str) -> CameraMatrix:
+  """Parse a manual intrinsics override string (fx,fy,cx,cy)."""
+  parts = [float(value.strip()) for value in spec.split(",") if value.strip()]
+  if len(parts) != 4:
+    raise ValueError(
+      "Intrinsics override must provide exactly four comma-separated values "
+      "(fx, fy, cx, cy)"
+    )
+  fx, fy, cx, cy = parts
+  return CameraMatrix(cx=cx, cy=cy, fx=fx, fy=fy)
+
 if __name__ == "__main__":
   import argparse
   
   parser = argparse.ArgumentParser(description="SLAM Pipeline with visualization options")
-  parser.add_argument("--video", type=str, default="data/office.MOV", help="Path to input video")
+  parser.add_argument(
+    "--input",
+    "--video",
+    dest="input_path",
+    type=str,
+    default="data/office.MOV",
+    help="Path to an input video file or image directory/sequence",
+  )
+  parser.add_argument(
+    "--source-type",
+    choices=["auto", "video", "image_dir", "kitti"],
+    default="auto",
+    help="Override automatic source detection",
+  )
+  parser.add_argument(
+    "--camera-subdir",
+    type=str,
+    default="image_2",
+    help="Camera folder or projection key when using KITTI-style archives (image_2/P2)",
+  )
   parser.add_argument("--visualizer", type=str, choices=["matplotlib", "rerun"], default="matplotlib",
                       help="Visualization backend: 'matplotlib' (static) or 'rerun' (real-time)")
   parser.add_argument("--max-frames", type=int, default=None, help="Maximum number of frames to process")
+  parser.add_argument(
+    "--intrinsics",
+    type=str,
+    default=None,
+    help="Manual intrinsics override formatted as fx,fy,cx,cy",
+  )
   args = parser.parse_args()
-  
-  if args.visualizer == "rerun":
-    # Use Rerun for real-time visualization
-    from rerun_visualizer import visualize_pipeline_with_rerun
-    visualize_pipeline_with_rerun(args.video, IphoneCameraInstrinsics, max_frames=args.max_frames)
+  input_path = Path(args.input_path)
+  frame_source, inferred_camera_matrix, _source_label = create_frame_source(
+    input_path=input_path,
+    source_type=args.source_type,
+    camera_subdir=args.camera_subdir,
+  )
+
+  if args.intrinsics:
+    camera_matrix = parse_intrinsics_override(args.intrinsics)
+  elif inferred_camera_matrix is not None:
+    camera_matrix = inferred_camera_matrix
   else:
-    # Use matplotlib for static visualization (original behavior)
-    video_path = args.video
-    cap = cv2.VideoCapture(video_path)
-    assert cap.isOpened(), f"Unable to open video: {video_path}"
+    camera_matrix = IphoneCameraInstrinsics
 
-    front_end = Front_End(IphoneCameraInstrinsics)
+  if args.visualizer == "rerun":
+    from rerun_visualizer import visualize_pipeline_with_rerun
 
-    while True:
-      ret, frame = cap.read()
-      if not ret:
-        break
-      gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-      front_end.ingest_image(gray, frame)
-    cap.release()
+    visualize_pipeline_with_rerun(
+      frame_source,
+      camera_matrix,
+      args.max_frames
+    )
+  else:
+    front_end = Front_End(camera_matrix)
+    processed_frames = run_frontend_on_stream(
+      front_end, frame_source, max_frames=args.max_frames
+    )
     
-    # Get and print map statistics
     stats = front_end.get_map_statistics()
     
     print("\n--- Map Statistics ---")
+    print(f"Processed frames: {processed_frames}")
     print(f"KeyFrames: {stats['n_keyframes']}")
     print(f"MapPoints: {stats['n_map_points']}")
     print(f"Initialization method: {stats['init_method']}")
@@ -845,7 +910,6 @@ if __name__ == "__main__":
     else:
       print("No map points triangulated")
     
-    # Print covisibility information
     print("\n--- Covisibility Graph ---")
     for kf in front_end.map.get_all_keyframes():
       print(f"{kf}")
@@ -854,7 +918,6 @@ if __name__ == "__main__":
     
     print("\n" + "="*60)
     
-    # Visualize the 3D map and camera poses
     print("\nGenerating 3D visualization...")
     visualize_frontend(
       front_end, 
