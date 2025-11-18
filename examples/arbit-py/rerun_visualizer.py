@@ -225,7 +225,7 @@ class RerunSLAMVisualizer:
         label = f"keyframe_{keyframe.id}"
         self.log_camera_pose(
             R, t, frame_id, label,
-            image=keyframe.image,
+            image=keyframe.color_image,
             camera_matrix=keyframe.camera_matrix
         )
         
@@ -460,11 +460,11 @@ def visualize_pipeline_with_rerun(video_path: str, camera_matrix, max_frames: Op
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
         # Log the current frame image (separate from 3D cameras)
-        viz.log_frame(gray, frame_id, is_keyframe=False)
+        viz.log_frame(frame, frame_id, is_keyframe=False)
         
         # Process frame
         prev_state = front_end.state
-        front_end.ingest_image(gray)
+        front_end.ingest_image(gray, frame)
         
         # Log features if available
         if front_end.prev_keypoints is not None:
@@ -502,7 +502,7 @@ def visualize_pipeline_with_rerun(video_path: str, camera_matrix, max_frames: Op
                 
                 viz.log_camera_pose(
                     R, t, frame_id, "tracking_camera",
-                    image=gray,
+                    image=frame,
                     camera_matrix=camera_matrix_np
                 )
         

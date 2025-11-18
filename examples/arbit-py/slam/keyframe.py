@@ -24,7 +24,7 @@ class KeyFrame:
     
     def __init__(self, image: np.ndarray, camera_matrix: np.ndarray,
                  pose_c_to_w: np.ndarray, keypoints: List[cv2.KeyPoint],
-                 descriptors: np.ndarray):
+                 descriptors: np.ndarray, color_image: Optional[np.ndarray] = None):
         """Initialize a KeyFrame.
         
         Args:
@@ -38,6 +38,7 @@ class KeyFrame:
         KeyFrame._next_id += 1
         
         self.image = image.copy()
+        self.color_image = color_image.copy() if color_image is not None else None
         self.camera_matrix = camera_matrix.copy()
         self.pose_c_to_w = pose_c_to_w.copy()  # 4x4 SE(3) transformation
         
@@ -117,6 +118,12 @@ class KeyFrame:
                 continue
             pairs.append((self.descriptors[idx].copy(), mp))
         return pairs
+    
+    def get_color_image(self) -> Optional[np.ndarray]:
+        """Return stored color image if available."""
+        if self.color_image is None:
+            return None
+        return self.color_image.copy()
     
     def get_n_matches(self) -> int:
         """Count how many keypoints have associated map points.

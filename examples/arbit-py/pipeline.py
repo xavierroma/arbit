@@ -1,5 +1,5 @@
 from collections import namedtuple
-from typing import List
+from typing import List, Optional
 import cv2
 import numpy as np
 from eth3_utils import load_case
@@ -35,6 +35,7 @@ class Front_End:
     self.min_tracked_points_for_keyframe = 40
     
     self.prev_frame: np.ndarray | None = None
+    self.prev_color_frame: np.ndarray | None = None
     self.prev_keypoints: list | None = None
     self.prev_descriptors: np.ndarray | None = None
     
@@ -42,18 +43,21 @@ class Front_End:
     self.init_method: str = ""  # Track which method was used (H or F)
     self.current_keyframe: KeyFrame | None = None
 
-  def ingest_image(self, image: np.ndarray):
+  def ingest_image(self, image: np.ndarray, color_image: np.ndarray | None = None):
+    if color_image is None:
+      color_image = image
     match self.state:
       case PipelineState.PRE_INIT:
-        self.pre_init(image)
+        self.pre_init(image, color_image)
       case PipelineState.INIT:
-        self.init(image)
+        self.init(image, color_image)
       case PipelineState.INITIALISED:
-        self.initialised(image)
+        self.initialised(image, color_image)
 
-  def pre_init(self, image: np.ndarray):
+  def pre_init(self, image: np.ndarray, color_image: np.ndarray):
     """Store first frame and extract features."""
     self.prev_frame = image
+    self.prev_color_frame = color_image
     self.prev_keypoints, self.prev_descriptors = self.orb.detectAndCompute(image, None)  # type: ignore
     n_keypoints = len(self.prev_keypoints) if self.prev_keypoints is not None else 0
     print(f"PRE_INIT: Detected {n_keypoints} keypoints in first frame")
@@ -186,15 +190,16 @@ class Front_End:
     descriptor_array = np.asarray(descriptors, dtype=np.uint8) if descriptors else np.empty((0, 32), dtype=np.uint8)
     return map_points, descriptor_array, projections
 
-  def _sample_keypoint_color(self, image: np.ndarray, keypoint: cv2.KeyPoint) -> np.ndarray:
+  def _sample_keypoint_color(self, keypoint: cv2.KeyPoint, color_image: Optional[np.ndarray], fallback_image: np.ndarray) -> np.ndarray:
     """Sample RGB color from the image at the keypoint location."""
-    if image is None or keypoint is None:
+    source = color_image if color_image is not None else fallback_image
+    if source is None or keypoint is None:
       return np.array([0, 255, 0], dtype=np.uint8)
-    h, w = image.shape[:2]
+    h, w = source.shape[:2]
     x = int(np.clip(round(keypoint.pt[0]), 0, w - 1))
     y = int(np.clip(round(keypoint.pt[1]), 0, h - 1))
-    pixel = image[y, x]
-    if image.ndim == 2:
+    pixel = source[y, x]
+    if source.ndim == 2:
       value = int(pixel)
       return np.array([value, value, value], dtype=np.uint8)
     if pixel.ndim == 0:
@@ -289,7 +294,7 @@ class Front_End:
     valid_mask = valid_depth & valid_reproj & np.isfinite(points_3d).all(axis=1)
     return points_3d, valid_mask
 
-  def init(self, image: np.ndarray):
+  def init(self, image: np.ndarray, color_image: np.ndarray):
     assert self.prev_frame is not None, "prev_frame must be set before init"
     assert self.prev_keypoints is not None, "prev_keypoints must be set before init"
     assert self.prev_descriptors is not None, "prev_descriptors must be set before init"
@@ -434,7 +439,8 @@ class Front_End:
       camera_matrix=self.camera_matrix,
       pose_c_to_w=pose_kf0,
       keypoints=keypoints0,
-      descriptors=descriptors0
+      descriptors=descriptors0,
+      color_image=self.prev_color_frame
     )
     
     # Build KeyFrame 1 (second frame, recovered pose)
@@ -447,7 +453,8 @@ class Front_End:
       camera_matrix=self.camera_matrix,
       pose_c_to_w=pose_kf1,
       keypoints=keypoints1,
-      descriptors=descriptors1
+      descriptors=descriptors1,
+      color_image=color_image
     )
     print(f"pose_kf1: {pose_kf1}")
     
@@ -469,7 +476,7 @@ class Front_End:
       match = matches[match_idx]
       kp0_idx, kp1_idx = match.queryIdx, match.trainIdx
       
-      kp_color = self._sample_keypoint_color(kf1.image, kf1.keypoints[kp1_idx])
+      kp_color = self._sample_keypoint_color(kf1.keypoints[kp1_idx], kf1.get_color_image(), kf1.image)
       mp = MapPoint(position=point_3d, color=kp_color)
       kf0.add_map_point(mp, kp0_idx)
       kf1.add_map_point(mp, kp1_idx)
@@ -493,7 +500,7 @@ class Front_End:
     
     self.state = PipelineState.INITIALISED
 
-  def initialised(self, image: np.ndarray):
+  def initialised(self, image: np.ndarray, color_image: np.ndarray):
     """Process frames after initialization (tracking state)."""
     # TODO: Implement tracking against local map
     # 1. Extract features from current frame
@@ -566,7 +573,8 @@ class Front_End:
       camera_matrix=self.camera_matrix,
       pose_c_to_w=T_c_to_w,
       keypoints=keypoints,
-      descriptors=descriptors
+      descriptors=descriptors,
+      color_image=color_image
     )
 
     for match, mp in zip(matches, matches_map_pts):
@@ -578,7 +586,7 @@ class Front_End:
       except ValueError:
         continue
       if mp.get_color() is None:
-        sampled_color = self._sample_keypoint_color(image, keypoints[kp_idx])
+        sampled_color = self._sample_keypoint_color(keypoints[kp_idx], color_image, image)
         mp.set_color(sampled_color)
     keyframe_metrics = self._build_keyframe_metrics(len(matches), T_c_to_w)
     if self._should_insert_keyframe(keyframe_metrics):
@@ -647,7 +655,7 @@ class Front_End:
           if not neighbor_mp.is_in_keyframe(kf.id):
             kf.add_map_point(neighbor_mp, kf_idx)
             if neighbor_mp.get_color() is None:
-              sampled_color = self._sample_keypoint_color(kf.image, kf.keypoints[kf_idx])
+              sampled_color = self._sample_keypoint_color(kf.keypoints[kf_idx], kf.get_color_image(), kf.image)
               neighbor_mp.set_color(sampled_color)
             kf_modified = True
           unmatched_indices.discard(kf_idx)
@@ -665,7 +673,7 @@ class Front_End:
           continue
 
         descriptor = kf.descriptors[kf_idx]
-        sampled_color = self._sample_keypoint_color(kf.image, kf.keypoints[kf_idx])
+        sampled_color = self._sample_keypoint_color(kf.keypoints[kf_idx], kf.get_color_image(), kf.image)
         mp = MapPoint(position=point_3d, descriptor=descriptor, color=sampled_color)
         neighbor.add_map_point(mp, neighbor_idx)
         kf.add_map_point(mp, kf_idx)
@@ -819,7 +827,7 @@ if __name__ == "__main__":
       if not ret:
         break
       gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-      front_end.ingest_image(gray)
+      front_end.ingest_image(gray, frame)
     cap.release()
     
     # Get and print map statistics
