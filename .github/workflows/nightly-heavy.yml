@@ -24,5 +24,8 @@ jobs:
       - name: Run FFI symbol parity checks
         run: ./scripts/check-ffi-symbol-parity.sh
 
+      - name: Run replay evaluation gates
+        run: ./scripts/run-replay-eval.sh
+
       - name: Run realtime and soak gates
         run: ./scripts/run-perf-gates.sh

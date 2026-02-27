@@ -5,6 +5,7 @@ members = [
     "crates/arbit-native",
     "crates/arbit-frontend",
     "crates/arbit-backend",
+    "crates/arbit-eval",
     "crates/arbit-engine",
     "crates/arbit-ffi",
     "crates/arbit-swift",
