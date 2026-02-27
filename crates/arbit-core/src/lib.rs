@@ -2,13 +2,10 @@ pub mod contracts;
 pub mod db;
 pub mod img;
 pub mod imu;
-pub mod init;
 pub mod logs;
 pub mod map;
 pub mod math;
-pub mod relocalize;
 pub mod time;
-pub mod track;
 
 #[cfg(test)]
 mod tests {

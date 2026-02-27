@@ -1,8 +1,6 @@
 use crate::db::{KeyframeDescriptor, KeyframeEntry, KeyframeIndex};
 use crate::math::se3::TransformSE3;
-use crate::track::feat_descriptor::FeatDescriptor;
-use crc32fast::Hasher;
-use image::{Pixel, Rgb, Rgba};
+use image::Rgba;
 use log::{info, warn};
 use nalgebra::{Matrix4, Point2, Point3, Translation3, UnitQuaternion, Vector3};
 use serde::{Deserialize, Serialize};
@@ -14,9 +12,6 @@ const GRID_SIZE: usize = 4;
 const CELL_COUNT: usize = GRID_SIZE * GRID_SIZE;
 const MIN_TRANSLATION_DELTA: f64 = 0.02;
 const MIN_ROTATION_DELTA_RAD: f64 = 5_f64.to_radians();
-const MAP_MAGIC: &[u8; 8] = b"ARBITMAP";
-const MAP_VERSION: u16 = 1;
-const WORLD_BASIS_Y_UP: u8 = 1;
 
 #[derive(Debug)]
 pub enum MapIoError {
@@ -59,13 +54,24 @@ pub struct Anchor {
 }
 
 #[derive(Debug, Clone)]
+pub struct BinaryFeatureDescriptor {
+    pub data: [u8; 32],
+}
+
+impl BinaryFeatureDescriptor {
+    pub fn new(data: [u8; 32]) -> Self {
+        Self { data }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct KeyframeFeature {
     pub norm_xy: Point2<f64>,
     pub world_xyz: Point3<f64>,
     pub landmark_id: u64,
     pub cell: usize,
     pub color: Option<Rgba<u8>>,
-    pub descriptor: FeatDescriptor<[u8; 32]>,
+    pub descriptor: BinaryFeatureDescriptor,
 }
 
 impl KeyframeFeature {
@@ -146,7 +152,7 @@ impl WorldMap {
             Point2<f64>,
             Point3<f64>,
             Option<Rgba<u8>>,
-            FeatDescriptor<[u8; 32]>,
+            BinaryFeatureDescriptor,
         )>,
     ) -> Option<u64> {
         trace!(target: "arbit_core::map", "Inserting keyframe with pose: {:?}", pose);
@@ -224,7 +230,7 @@ impl WorldMap {
             Point3<f64>,
             u64,
             Option<Rgba<u8>>,
-            FeatDescriptor<[u8; 32]>,
+            BinaryFeatureDescriptor,
         )>,
     ) {
         if features.is_empty() {
