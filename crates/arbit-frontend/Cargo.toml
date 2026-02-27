@@ -3,6 +3,11 @@ name = "arbit-frontend"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["native-opencv"]
+native-opencv = ["arbit-native/native-opencv"]
+
 [dependencies]
 arbit-core = { path = "../arbit-core" }
+arbit-native = { path = "../arbit-native", default-features = false }
 tracing = "0.1.41"

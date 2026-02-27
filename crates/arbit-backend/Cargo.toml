@@ -3,6 +3,12 @@ name = "arbit-backend"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["native-gtsam", "native-bow"]
+native-gtsam = ["arbit-native/native-gtsam"]
+native-bow = ["arbit-native/native-bow"]
+
 [dependencies]
 arbit-core = { path = "../arbit-core" }
+arbit-native = { path = "../arbit-native", default-features = false }
 tracing = "0.1.41"

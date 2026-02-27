@@ -231,6 +231,7 @@ fn spawn_frontend_worker(state: Arc<RuntimeState>, config: EngineConfig) -> Join
         let mut frontend = CpuFrontend::new(CpuFrontendConfig {
             keyframe_interval: config.keyframe_interval,
             min_tracks_for_keyframe: config.min_tracks_for_keyframe,
+            ..CpuFrontendConfig::default()
         });
         let mut latencies_ms: VecDeque<f64> = VecDeque::with_capacity(120);
 
@@ -381,12 +382,29 @@ pub fn default_anchor_pose() -> [f64; 16] {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Instant;
 
     use arbit_providers::{
         ArKitFrame, ArKitIntrinsics, CameraSample, IosCameraProvider, PixelFormat,
     };
 
     use super::*;
+
+    fn textured_bgra(width: usize, height: usize) -> Arc<[u8]> {
+        let mut data = vec![0_u8; width * height * 4];
+        for y in 0..height {
+            for x in 0..width {
+                let checker = ((x / 8) + (y / 8)) % 2;
+                let luma = if checker == 0 { 24_u8 } else { 224_u8 };
+                let idx = (y * width + x) * 4;
+                data[idx] = luma;
+                data[idx + 1] = luma;
+                data[idx + 2] = luma;
+                data[idx + 3] = 255;
+            }
+        }
+        data.into()
+    }
 
     fn sample_camera(timestamp: f64) -> CameraSample {
         let mut provider = IosCameraProvider::new();
@@ -404,7 +422,7 @@ mod tests {
             },
             pixel_format: PixelFormat::Bgra8,
             bytes_per_row: 640 * 4,
-            data: Arc::from(vec![0_u8; 640 * 480 * 4]),
+            data: textured_bgra(640, 480),
         })
     }
 
@@ -443,7 +461,17 @@ mod tests {
         let engine = SlamEngine::new();
 
         assert!(engine.ingest_frame(&sample_camera(0.0)));
-        thread::sleep(Duration::from_millis(30));
+        let start = Instant::now();
+        loop {
+            let snapshot = engine.snapshot();
+            if snapshot.tracking.frame_id >= 1 {
+                break;
+            }
+            if start.elapsed() >= Duration::from_millis(300) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
 
         let snapshot = engine.snapshot();
         assert!(snapshot.tracking.frame_id >= 1);
