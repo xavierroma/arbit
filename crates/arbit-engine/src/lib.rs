@@ -390,33 +390,30 @@ pub fn default_anchor_pose() -> [f64; 16] {
 mod tests {
     use std::sync::Arc;
 
-    use arbit_core::math::{CameraIntrinsics, DistortionModel};
-    use arbit_core::time::{FrameTimestamps, MonotonicTime};
-    use arbit_providers::{CameraSample, PixelFormat};
+    use arbit_providers::{
+        ArKitFrame, ArKitIntrinsics, CameraSample, IosCameraProvider, PixelFormat,
+    };
 
     use super::*;
 
     fn sample_camera(timestamp: f64) -> CameraSample {
-        CameraSample {
-            timestamps: FrameTimestamps {
-                capture: MonotonicTime::from_duration(Duration::from_secs_f64(timestamp)),
-                pipeline: MonotonicTime::from_duration(Duration::from_secs_f64(timestamp)),
-                latency: Duration::from_millis(0),
+        let mut provider = IosCameraProvider::new();
+        provider.ingest_frame(ArKitFrame {
+            timestamp: Duration::from_secs_f64(timestamp),
+            intrinsics: ArKitIntrinsics {
+                fx: 600.0,
+                fy: 600.0,
+                cx: 320.0,
+                cy: 240.0,
+                skew: 0.0,
+                width: 640,
+                height: 480,
+                distortion: None,
             },
-            intrinsics: CameraIntrinsics::new(
-                600.0,
-                600.0,
-                320.0,
-                240.0,
-                0.0,
-                640,
-                480,
-                DistortionModel::None,
-            ),
             pixel_format: PixelFormat::Bgra8,
             bytes_per_row: 640 * 4,
             data: Arc::from(vec![0_u8; 640 * 480 * 4]),
-        }
+        })
     }
 
     #[test]
