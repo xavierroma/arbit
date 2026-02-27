@@ -1,0 +1,8 @@
+[package]
+name = "arbit-backend"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arbit-core = { path = "../arbit-core" }
+tracing = "0.1.41"

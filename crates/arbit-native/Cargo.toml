@@ -1,0 +1,13 @@
+[package]
+name = "arbit-native"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+native-opencv = []
+native-gtsam = []
+native-bow = []
+
+[dependencies]
+thiserror = "2.0.17"

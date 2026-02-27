@@ -2,6 +2,9 @@
 members = [
     "crates/arbit-core",
     "crates/arbit-providers",
+    "crates/arbit-native",
+    "crates/arbit-frontend",
+    "crates/arbit-backend",
     "crates/arbit-engine",
     "crates/arbit-ffi",
     "crates/arbit-swift",
