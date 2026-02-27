@@ -1,55 +1,29 @@
 [package]
 name = "arbit-engine"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [features]
 default = []
 debug-server = [
     "dep:axum",
     "dep:tokio",
-    "dep:tower-http",
     "dep:serde_json",
-    "dep:image",
-    "dep:lru",
-    "dep:metrics",
-    "dep:metrics-exporter-prometheus",
-    "dep:mcap",
-    "dep:utoipa",
-    "dep:utoipa-swagger-ui",
-    "dep:ts-rs",
-    "dep:tower",
+    "dep:tower-http",
 ]
 debug-server-lan = ["debug-server"]
 
 [dependencies]
 arbit-core = { path = "../arbit-core" }
+arbit-frontend = { path = "../arbit-frontend" }
+arbit-backend = { path = "../arbit-backend" }
 arbit-providers = { path = "../arbit-providers" }
-log = "0.4"
-nalgebra = "0.34.1"
 serde = { version = "1.0", features = ["derive"] }
 tracing = "0.1.41"
 axum = { version = "0.8.6", optional = true }
-tokio = { version = "1.47.1", features = ["rt", "rt-multi-thread", "macros", "sync", "net", "time"], optional = true }
-tower-http = { version = "0.6.6", features = ["cors", "trace", "timeout"], optional = true }
+tokio = { version = "1.47.1", features = ["rt", "rt-multi-thread", "sync", "net"], optional = true }
 serde_json = { version = "1.0.145", optional = true }
-image = { version = "0.25.8", default-features = false, features = ["png", "jpeg"], optional = true }
-lru = { version = "0.16.1", optional = true }
-tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
-metrics = { version = "0.24.2", optional = true }
-metrics-exporter-prometheus = { version = "0.17.2", optional = true }
-mcap = { version = "0.23.3", optional = true }
-utoipa = { version = "5.4.0", features = ["axum_extras"], optional = true }
-utoipa-swagger-ui = { version = "9.0.2", features = ["axum"], optional = true }
-ts-rs = { version = "11.0.1", optional = true }
 thiserror = "2.0.17"
-tower = { version = "0.5.2", optional = true, features = ["limit", "timeout", "util"] }
-imageproc = { version = "0.25.0", features = ["display-window"] }
-rerun = "0.26.2"
-ffmpeg-next = "8.0.0"
-anyhow = "1.0.100"
-
-
-[[bin]]
-name = "arbit-engine-cli"
-path = "src/cli.rs"
+tower-http = { version = "0.6.6", features = ["cors", "trace"], optional = true }
+crossbeam = "0.8.4"
+arc-swap = "1.7.1"

@@ -1,10 +1,3 @@
-//! Debug server runtime scaffolding.
-//!
-//! This module wires up the background Tokio runtime that hosts the HTTP/
-//! WebSocket debug surface. Higher level routing and protocol concerns are
-//! built in subsequent phases; here we focus on lifecycle management and
-//! graceful shutdown semantics.
-
 mod router;
 
 use std::fmt;
@@ -16,15 +9,11 @@ use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use crate::ProcessingEngine;
+use crate::SlamEngine;
 
-/// Configuration options controlling the debug server runtime.
 #[derive(Debug, Clone)]
 pub struct DebugServerOpts {
-    /// TCP port to bind. Use `0` for an ephemeral port.
     pub port: u16,
-    /// Whether to accept LAN connections (binds `0.0.0.0`). Requires the
-    /// `debug-server-lan` feature and defaults to false otherwise.
     pub allow_lan: bool,
 }
 
@@ -37,7 +26,6 @@ impl Default for DebugServerOpts {
     }
 }
 
-/// Handle to a running debug server instance.
 pub struct DebugServerHandle {
     runtime: Option<Runtime>,
     server_task: Option<JoinHandle<Result<(), DebugServerError>>>,
@@ -46,7 +34,6 @@ pub struct DebugServerHandle {
 }
 
 impl DebugServerHandle {
-    /// Returns the address the server is bound to.
     pub fn bound_addr(&self) -> SocketAddr {
         self.bound_addr
     }
@@ -74,13 +61,11 @@ impl Drop for DebugServerHandle {
     }
 }
 
-/// Entry point for starting and stopping the embedded debug server.
 pub struct DebugServer;
 
 impl DebugServer {
-    /// Spawn the debug server against the provided engine reference.
     pub fn start(
-        engine: Arc<RwLock<ProcessingEngine>>,
+        engine: Arc<RwLock<SlamEngine>>,
         opts: DebugServerOpts,
     ) -> Result<DebugServerHandle, DebugServerError> {
         let runtime = RuntimeBuilder::new_multi_thread()
@@ -93,16 +78,14 @@ impl DebugServer {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (bound_tx, bound_rx) = oneshot::channel();
 
-        let port = opts.port;
-        let allow_lan = opts.allow_lan;
         let server_task = runtime.spawn(async move {
-            let bind_ip = if allow_lan {
+            let bind_ip = if opts.allow_lan {
                 IpAddr::V4(Ipv4Addr::UNSPECIFIED)
             } else {
                 IpAddr::V4(Ipv4Addr::LOCALHOST)
             };
-            let bind_addr = SocketAddr::new(bind_ip, port);
 
+            let bind_addr = SocketAddr::new(bind_ip, opts.port);
             let listener = tokio::net::TcpListener::bind(bind_addr)
                 .await
                 .map_err(|source| DebugServerError::Bind { addr: bind_addr, source })?;
@@ -110,17 +93,9 @@ impl DebugServer {
             let local_addr = listener
                 .local_addr()
                 .map_err(DebugServerError::LocalAddr)?;
-
             let _ = bound_tx.send(local_addr);
 
-            if allow_lan {
-                tracing::warn!(%local_addr, "Debug server listening on LAN without authentication; intended for local dev only.");
-            } else {
-                tracing::info!(%local_addr, "Debug server listening on loopback interface");
-            }
-
             let app: Router = router::build_router(engine);
-
             axum::serve(
                 listener,
                 app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -132,23 +107,9 @@ impl DebugServer {
             .map_err(DebugServerError::Serve)
         });
 
-        let bound_addr = match runtime.block_on(bound_rx) {
-            Ok(addr) => addr,
-            Err(_) => {
-                let err = runtime.block_on(async {
-                    match server_task.await {
-                        Ok(Ok(())) => DebugServerError::Startup(
-                            "debug server exited before completing startup".into(),
-                        ),
-                        Ok(Err(err)) => err,
-                        Err(join_err) => DebugServerError::Join(join_err),
-                    }
-                });
-                return Err(err);
-            }
-        };
-
-        tracing::debug!(%bound_addr, "Debug server started");
+        let bound_addr = runtime
+            .block_on(bound_rx)
+            .map_err(|_| DebugServerError::Startup("failed to obtain bound address".into()))?;
 
         Ok(DebugServerHandle {
             runtime: Some(runtime),
@@ -158,7 +119,6 @@ impl DebugServer {
         })
     }
 
-    /// Request a graceful shutdown of the running server.
     pub fn stop(mut handle: DebugServerHandle) -> Result<(), DebugServerError> {
         if let Some(tx) = handle.shutdown_tx.take() {
             let _ = tx.send(());
@@ -180,7 +140,6 @@ impl DebugServer {
     }
 }
 
-/// Errors surfaced by the debug server runtime.
 #[derive(Debug, thiserror::Error)]
 pub enum DebugServerError {
     #[error("failed to initialize tokio runtime: {0}")]
@@ -215,7 +174,7 @@ mod tests {
 
     #[test]
     fn start_and_stop_smoke() {
-        let engine = Arc::new(RwLock::new(ProcessingEngine::new()));
+        let engine = Arc::new(RwLock::new(SlamEngine::new()));
         let opts = DebugServerOpts {
             port: 0,
             allow_lan: false,
