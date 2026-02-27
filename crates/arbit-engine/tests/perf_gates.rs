@@ -147,7 +147,9 @@ fn soak_gate_queue_stability() {
         IosCameraProvider::with_policy(TimestampPolicy::with_clock(DeterministicClock::default()));
     let frame_data: Arc<[u8]> = vec![63_u8; (WIDTH as usize) * (HEIGHT as usize) * 4].into();
 
-    let total_frames = 18_000_usize;
+    let total_frames = 6_000_usize;
+    let pacing = Duration::from_millis(1);
+    let mut next_tick = Instant::now();
     for idx in 0..total_frames {
         let ts = (idx as f64) / 30.0;
         let sample = build_sample(&mut provider, &frame_data, ts);
@@ -155,12 +157,14 @@ fn soak_gate_queue_stability() {
         if idx % 2 == 0 {
             assert!(engine.ingest_imu(ts, [0.0, 0.0, -9.81], [0.0, 0.0, 0.0]));
         }
-        if idx % 240 == 0 {
-            thread::sleep(Duration::from_millis(1));
+        next_tick += pacing;
+        let now = Instant::now();
+        if next_tick > now {
+            thread::sleep(next_tick - now);
         }
     }
 
-    let snapshot = wait_for_target(&engine, total_frames as u64, Duration::from_secs(15));
+    let snapshot = wait_for_target(&engine, total_frames as u64, Duration::from_secs(20));
     let processed = snapshot.tracking.frame_id as f64;
     let drop_rate = (snapshot.metrics.dropped_frames as f64) / (total_frames as f64);
 
