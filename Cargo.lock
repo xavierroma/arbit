@@ -71,14 +71,12 @@ version = "0.1.0"
 dependencies = [
  "approx",
  "bincode",
- "crc32fast",
  "image",
  "imageproc",
  "log",
  "nalgebra 0.34.1",
  "nalgebra-glm",
  "rand",
- "rayon",
  "serde",
  "tracing",
 ]
