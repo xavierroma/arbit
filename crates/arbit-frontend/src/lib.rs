@@ -87,10 +87,12 @@ impl CpuFrontend {
             return (current_features.len() as u32).min(96);
         }
 
-        match self
-            .native_adapter
-            .match_features(&self.previous_features, current_features, 72, true)
-        {
+        match self.native_adapter.match_features(
+            &self.previous_features,
+            current_features,
+            72,
+            true,
+        ) {
             Ok(matches) => {
                 if matches.is_empty() {
                     (current_features.len() as u32 / 4).min(64)
@@ -138,7 +140,8 @@ impl FrontendProcessor for CpuFrontend {
             tracking_state,
             TrackingState::Tracking | TrackingState::Initializing
         ) {
-            let tracking_confidence = (inlier_count as f64 / track_count.max(1) as f64).clamp(0.05, 1.0);
+            let tracking_confidence =
+                (inlier_count as f64 / track_count.max(1) as f64).clamp(0.05, 1.0);
             pose_wc[11] -= 0.0025 + (1.0 - tracking_confidence) * 0.0015 + imu_delta * 0.0004;
         }
 

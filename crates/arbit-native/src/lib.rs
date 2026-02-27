@@ -232,9 +232,12 @@ fn is_low_texture_bgra(
             "bytes_per_row smaller than packed BGRA row",
         ));
     }
-    let required = bytes_per_row
-        .checked_mul(height as usize)
-        .ok_or(NativeKernelError::InvalidInput("frame buffer size overflow"))?;
+    let required =
+        bytes_per_row
+            .checked_mul(height as usize)
+            .ok_or(NativeKernelError::InvalidInput(
+                "frame buffer size overflow",
+            ))?;
     if data.len() < required {
         return Err(NativeKernelError::InvalidInput(
             "frame buffer shorter than expected",
@@ -429,9 +432,12 @@ fn decode_bgra_to_gray(
         ));
     }
 
-    let required = bytes_per_row
-        .checked_mul(height as usize)
-        .ok_or(NativeKernelError::InvalidInput("frame buffer size overflow"))?;
+    let required =
+        bytes_per_row
+            .checked_mul(height as usize)
+            .ok_or(NativeKernelError::InvalidInput(
+                "frame buffer size overflow",
+            ))?;
     if data.len() < required {
         return Err(NativeKernelError::InvalidInput(
             "frame buffer shorter than expected",
@@ -723,7 +729,10 @@ fn solve_translation_graph(
     let mut current = [0.0_f64; 3];
     initial_values.insert("x0".to_string(), na::DVector::from_vec(vec![0.0, 0.0, 0.0]));
     for idx in 1..node_count {
-        if let Some(edge) = edges.iter().find(|edge| edge.from + 1 == idx && edge.to == idx) {
+        if let Some(edge) = edges
+            .iter()
+            .find(|edge| edge.from + 1 == idx && edge.to == idx)
+        {
             current[0] += edge.delta_xyz[0];
             current[1] += edge.delta_xyz[1];
             current[2] += edge.delta_xyz[2];
@@ -747,7 +756,9 @@ fn solve_translation_graph(
     let mut translations = vec![[0.0_f64; 3]; node_count];
     for (idx, slot) in translations.iter_mut().enumerate() {
         let key = format!("x{idx}");
-        let value = solved.get(&key).ok_or(NativeKernelError::OptimizationFailed)?;
+        let value = solved
+            .get(&key)
+            .ok_or(NativeKernelError::OptimizationFailed)?;
         if value.len() != 3 {
             return Err(NativeKernelError::OptimizationFailed);
         }

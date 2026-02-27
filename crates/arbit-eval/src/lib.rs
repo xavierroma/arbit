@@ -193,7 +193,9 @@ pub fn evaluate_dataset_path(
     evaluate_dataset(&dataset)
 }
 
-pub fn evaluate_dataset(dataset: &ReplayDataset) -> Result<ReplayEvaluationReport, ReplayEvalError> {
+pub fn evaluate_dataset(
+    dataset: &ReplayDataset,
+) -> Result<ReplayEvaluationReport, ReplayEvalError> {
     dataset.validate()?;
 
     let engine = SlamEngine::with_config(EngineConfig {
@@ -204,9 +206,8 @@ pub fn evaluate_dataset(dataset: &ReplayDataset) -> Result<ReplayEvaluationRepor
         ..EngineConfig::default()
     });
 
-    let mut provider = IosCameraProvider::with_policy(TimestampPolicy::with_clock(
-        DeterministicClock::default(),
-    ));
+    let mut provider =
+        IosCameraProvider::with_policy(TimestampPolicy::with_clock(DeterministicClock::default()));
 
     let mut estimates = Vec::with_capacity(dataset.frames.len());
     let mut timestamps = Vec::with_capacity(dataset.frames.len());
@@ -251,7 +252,11 @@ pub fn evaluate_dataset(dataset: &ReplayDataset) -> Result<ReplayEvaluationRepor
             ));
         }
 
-        let snapshot = wait_for_frame(&engine, (frame_index + 1) as u64, Duration::from_millis(800))?;
+        let snapshot = wait_for_frame(
+            &engine,
+            (frame_index + 1) as u64,
+            Duration::from_millis(800),
+        )?;
         estimates.push(snapshot.tracking.pose_wc);
         timestamps.push(snapshot.timestamp_seconds);
         states.push(snapshot.tracking.state);
@@ -454,9 +459,8 @@ fn compute_relocalization_recovery(
             continue;
         }
 
-        let recovered = (event.drop_end_frame..states.len()).find(|index| {
-            matches!(states[*index], TrackingState::Tracking)
-        });
+        let recovered = (event.drop_end_frame..states.len())
+            .find(|index| matches!(states[*index], TrackingState::Tracking));
 
         match recovered {
             Some(index) => {
