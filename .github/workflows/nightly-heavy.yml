@@ -1,0 +1,25 @@
+name: Nightly Heavy
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  heavy-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build all targets with all features
+        run: cargo check --workspace --all-targets --all-features
+
+      - name: Run workspace tests
+        run: cargo test --workspace --all-targets
+
+      - name: Run FFI symbol parity checks
+        run: ./scripts/check-ffi-symbol-parity.sh
