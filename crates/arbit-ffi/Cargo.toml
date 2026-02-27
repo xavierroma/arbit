@@ -7,9 +7,7 @@ edition = "2024"
 arbit-core = { path = "../arbit-core" }
 arbit-engine = { path = "../arbit-engine" }
 arbit-providers = { path = "../arbit-providers" }
-nalgebra = "0.34.1"
 log = "0.4"
-env_logger = "0.11"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 
 [lib]

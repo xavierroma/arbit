@@ -1,40 +1,22 @@
 """
-Arbit Python bindings - Visual-Inertial SLAM engine
+Arbit Python bindings (v2 API).
 """
 
 from .engine import ArbitEngine, CameraFrame, ImuSample
-from .types import PixelFormat, MotionState, TrackStatus, Transform, FrameState, ImuState, FeatDescriptor, Match
+from .types import Anchor, PixelFormat, Snapshot, TrackingState, Transform
 
 __all__ = [
     "ArbitEngine",
-    "CameraFrame", 
+    "CameraFrame",
     "ImuSample",
+    "Anchor",
     "PixelFormat",
-    "MotionState",
-    "TrackStatus",
+    "Snapshot",
+    "TrackingState",
     "Transform",
-    "FrameState",
-    "ImuState",
-    "FeatDescriptor",
-    "Match",
     "init_logging",
 ]
 
 
-def init_logging(verbose: bool = True):
-    """
-    Initialize Arbit logging for debugging.
-    
-    Call this before creating any ArbitEngine instances to enable detailed
-    logging from the Rust engine. Set RUST_LOG environment variable to
-    control log levels (e.g., RUST_LOG=debug).
-    
-    Args:
-        verbose: Whether to print library location
-        
-    Example:
-        >>> import arbit
-        >>> arbit.init_logging()
-        >>> engine = arbit.ArbitEngine()
-    """
-    ArbitEngine.init_logging(verbose=verbose)
+def init_logging() -> None:
+    ArbitEngine.init_logging()
