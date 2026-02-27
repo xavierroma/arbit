@@ -6,3 +6,4 @@
 *.xcbkptlist
 **/xcuserdata/
 .swiftpm/
+/examples/arbit-py/
