@@ -31,3 +31,7 @@ extra_bindings = []
 # Export all public items, exclude internal types
 exclude = ["CaptureContext"]
 
+[enum]
+# C enums share a global constant namespace; prefix constants with enum name
+# to avoid collisions across v1/v2 ABI enums (e.g. Bgra8 in multiple enums).
+prefix_with_name = true

@@ -465,11 +465,11 @@ fn duration_from_seconds(seconds: f64) -> Duration {
 
 fn v2_from_v1_pixel_format(format: ArbitPixelFormat) -> ArbitV2PixelFormat {
     match format {
-        ArbitPixelFormat::Bgra8 => ArbitV2PixelFormat::Bgra8,
-        ArbitPixelFormat::Rgba8 => ArbitV2PixelFormat::Rgba8,
-        ArbitPixelFormat::Nv12 => ArbitV2PixelFormat::Nv12,
-        ArbitPixelFormat::Yv12 => ArbitV2PixelFormat::Yv12,
-        ArbitPixelFormat::Depth16 => ArbitV2PixelFormat::Depth16,
+        ArbitPixelFormat::LegacyBgra8 => ArbitV2PixelFormat::Bgra8,
+        ArbitPixelFormat::LegacyRgba8 => ArbitV2PixelFormat::Rgba8,
+        ArbitPixelFormat::LegacyNv12 => ArbitV2PixelFormat::Nv12,
+        ArbitPixelFormat::LegacyYv12 => ArbitV2PixelFormat::Yv12,
+        ArbitPixelFormat::LegacyDepth16 => ArbitV2PixelFormat::Depth16,
     }
 }
 
@@ -506,11 +506,11 @@ fn sample_to_v1(sample: &CameraSample) -> ArbitCameraSample {
             distortion: ptr::null(),
         },
         pixel_format: match sample.pixel_format {
-            PixelFormat::Bgra8 => ArbitPixelFormat::Bgra8,
-            PixelFormat::Rgba8 => ArbitPixelFormat::Rgba8,
-            PixelFormat::Nv12 => ArbitPixelFormat::Nv12,
-            PixelFormat::Yv12 => ArbitPixelFormat::Yv12,
-            PixelFormat::Depth16 => ArbitPixelFormat::Depth16,
+            PixelFormat::Bgra8 => ArbitPixelFormat::LegacyBgra8,
+            PixelFormat::Rgba8 => ArbitPixelFormat::LegacyRgba8,
+            PixelFormat::Nv12 => ArbitPixelFormat::LegacyNv12,
+            PixelFormat::Yv12 => ArbitPixelFormat::LegacyYv12,
+            PixelFormat::Depth16 => ArbitPixelFormat::LegacyDepth16,
         },
         bytes_per_row: sample.bytes_per_row,
     }
@@ -519,11 +519,11 @@ fn sample_to_v1(sample: &CameraSample) -> ArbitCameraSample {
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ArbitPixelFormat {
-    Bgra8 = 0,
-    Rgba8 = 1,
-    Nv12 = 2,
-    Yv12 = 3,
-    Depth16 = 4,
+    LegacyBgra8 = 0,
+    LegacyRgba8 = 1,
+    LegacyNv12 = 2,
+    LegacyYv12 = 3,
+    LegacyDepth16 = 4,
 }
 
 #[repr(C)]
