@@ -1,6 +1,6 @@
 use std::sync::{Arc, RwLock};
 
-use axum::{extract::State, response::IntoResponse, routing::get, Json, Router};
+use axum::{Json, Router, extract::State, response::IntoResponse, routing::get};
 
 use crate::SlamEngine;
 

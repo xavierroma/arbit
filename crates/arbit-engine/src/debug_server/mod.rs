@@ -88,11 +88,12 @@ impl DebugServer {
             let bind_addr = SocketAddr::new(bind_ip, opts.port);
             let listener = tokio::net::TcpListener::bind(bind_addr)
                 .await
-                .map_err(|source| DebugServerError::Bind { addr: bind_addr, source })?;
+                .map_err(|source| DebugServerError::Bind {
+                    addr: bind_addr,
+                    source,
+                })?;
 
-            let local_addr = listener
-                .local_addr()
-                .map_err(DebugServerError::LocalAddr)?;
+            let local_addr = listener.local_addr().map_err(DebugServerError::LocalAddr)?;
             let _ = bound_tx.send(local_addr);
 
             let app: Router = router::build_router(engine);

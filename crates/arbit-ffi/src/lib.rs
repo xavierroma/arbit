@@ -4,12 +4,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arbit_core::contracts::{
-    identity_pose, AnchorSnapshot, EngineSnapshot, MapRepository, TrackingState,
+    AnchorSnapshot, EngineSnapshot, MapRepository, TrackingState, identity_pose,
 };
 use arbit_engine::SlamEngine;
 use arbit_providers::{ArKitFrame, ArKitIntrinsics, CameraSample, IosCameraProvider, PixelFormat};
 use log::{info, warn};
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 
 struct CaptureContext {
     engine: SlamEngine,
@@ -345,9 +345,7 @@ pub unsafe extern "C" fn arbit_v2_query_anchor(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn arbit_v2_reset_session(
-    handle: *mut ArbitCaptureContextHandle,
-) -> bool {
+pub unsafe extern "C" fn arbit_v2_reset_session(handle: *mut ArbitCaptureContextHandle) -> bool {
     if handle.is_null() {
         return false;
     }

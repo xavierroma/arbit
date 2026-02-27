@@ -1,5 +1,5 @@
 use arbit_core::contracts::{
-    identity_pose, FramePacket, FrontendOutput, FrontendProcessor, ImuPacket, TrackingState,
+    FramePacket, FrontendOutput, FrontendProcessor, ImuPacket, TrackingState, identity_pose,
 };
 
 #[derive(Debug, Clone)]
@@ -34,7 +34,11 @@ impl CpuFrontend {
     }
 
     fn estimate_track_count(&self, frame: &FramePacket) -> u32 {
-        let spatial_budget = (frame.intrinsics.width.saturating_mul(frame.intrinsics.height) / 4_096)
+        let spatial_budget = (frame
+            .intrinsics
+            .width
+            .saturating_mul(frame.intrinsics.height)
+            / 4_096)
             .clamp(80, 1_200);
         spatial_budget as u32
     }
@@ -102,7 +106,7 @@ mod tests {
     use std::sync::Arc;
 
     use arbit_core::{
-        contracts::{PixelFormat, FrontendProcessor},
+        contracts::{FrontendProcessor, PixelFormat},
         math::{CameraIntrinsics, DistortionModel},
     };
 

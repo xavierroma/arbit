@@ -7,14 +7,14 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use arc_swap::ArcSwap;
 use arbit_backend::{GraphBackend, GraphBackendConfig};
 use arbit_core::contracts::{
-    identity_pose, AnchorSnapshot, BackendOptimizer, EngineSnapshot, FramePacket, FrontendProcessor,
-    ImuPacket, KeyframeCandidate, MapRepository, PixelFormat,
+    AnchorSnapshot, BackendOptimizer, EngineSnapshot, FramePacket, FrontendProcessor, ImuPacket,
+    KeyframeCandidate, MapRepository, PixelFormat, identity_pose,
 };
 use arbit_frontend::{CpuFrontend, CpuFrontendConfig};
 use arbit_providers::{CameraSample, PixelFormat as ProviderPixelFormat};
+use arc_swap::ArcSwap;
 use crossbeam::queue::ArrayQueue;
 
 #[derive(Debug, Clone)]
@@ -58,10 +58,7 @@ struct RuntimeState {
 
 impl RuntimeState {
     fn anchor_count(&self) -> u64 {
-        self.anchors
-            .lock()
-            .expect("anchors mutex poisoned")
-            .len() as u64
+        self.anchors.lock().expect("anchors mutex poisoned").len() as u64
     }
 }
 
@@ -167,7 +164,9 @@ impl SlamEngine {
         self.state.next_frame_id.store(0, Ordering::SeqCst);
         self.state.next_anchor_id.store(1, Ordering::SeqCst);
         self.state.dropped_frames.store(0, Ordering::SeqCst);
-        self.state.snapshot.store(Arc::new(EngineSnapshot::default()));
+        self.state
+            .snapshot
+            .store(Arc::new(EngineSnapshot::default()));
     }
 }
 
@@ -326,10 +325,7 @@ fn spawn_loop_worker(state: Arc<RuntimeState>) -> JoinHandle<()> {
     })
 }
 
-fn apply_backend_update(
-    state: &RuntimeState,
-    update: &arbit_core::contracts::BackendUpdate,
-) {
+fn apply_backend_update(state: &RuntimeState, update: &arbit_core::contracts::BackendUpdate) {
     let mut snapshot = state.snapshot.load().as_ref().clone();
     snapshot.backend.keyframe_count = update.keyframe_count;
     snapshot.backend.loop_closure_events = update.loop_closure_events;
@@ -339,11 +335,7 @@ fn apply_backend_update(
     state.snapshot.store(Arc::new(snapshot));
 }
 
-fn bounded_latest_push<T>(
-    queue: &ArrayQueue<T>,
-    mut value: T,
-    drop_counter: Option<&AtomicU64>,
-) {
+fn bounded_latest_push<T>(queue: &ArrayQueue<T>, mut value: T, drop_counter: Option<&AtomicU64>) {
     loop {
         match queue.push(value) {
             Ok(()) => return,

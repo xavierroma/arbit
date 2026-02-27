@@ -1,5 +1,5 @@
 use arbit_core::contracts::{
-    identity_pose, BackendOptimizer, BackendUpdate, KeyframeCandidate, PlaceRecognizer,
+    BackendOptimizer, BackendUpdate, KeyframeCandidate, PlaceRecognizer, identity_pose,
 };
 
 #[derive(Debug, Clone)]
