@@ -44,6 +44,12 @@ private func ffi_v2_query_anchor(
 @_silgen_name("arbit_v2_reset_session")
 private func ffi_v2_reset_session(_ handle: OpaquePointer?) -> Bool
 
+private func poseArray<T>(from poseStorage: T) -> [Double] {
+    withUnsafeBytes(of: poseStorage) { rawBuffer in
+        Array(rawBuffer.bindMemory(to: Double.self).prefix(16))
+    }
+}
+
 public struct V2CameraFrame {
     public var timestamp: Double
     public var intrinsics: CameraIntrinsics
@@ -69,8 +75,8 @@ public struct V2CameraFrame {
         _ body: (ArbitFFI.ArbitV2CameraFrame) -> Result
     ) -> Result {
         intrinsics.withFFI { ffiIntrinsics in
-            data.withUnsafeBytes { rawBuffer in
-                let ptr = rawBuffer.bindMemory(to: UInt8.self).baseAddress
+            data.withUnsafeBytes { (rawBuffer: UnsafeRawBufferPointer) in
+                let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self)
                 let ffiFrame = ArbitFFI.ArbitV2CameraFrame(
                     timestamp_seconds: timestamp,
                     intrinsics: ArbitFFI.ArbitV2CameraIntrinsics(
@@ -85,9 +91,9 @@ public struct V2CameraFrame {
                         distortion: ffiIntrinsics.distortion
                     ),
                     pixel_format: ArbitFFI.ArbitV2PixelFormat(rawValue: pixelFormat.rawValue),
-                    bytes_per_row: bytesPerRow,
+                    bytes_per_row: UInt(bytesPerRow),
                     data: ptr,
-                    data_len: data.count
+                    data_len: UInt(data.count)
                 )
                 return body(ffiFrame)
             }
@@ -131,7 +137,7 @@ public struct V2TrackingSnapshot {
         frameId = ffi.frame_id
         trackCount = ffi.track_count
         inlierCount = ffi.inlier_count
-        poseWC = Array(ffi.pose_wc)
+        poseWC = poseArray(from: ffi.pose_wc)
     }
 }
 
@@ -168,10 +174,10 @@ public struct V2RuntimeMetricsSnapshot {
     public var endToEndMsP95: Double
 
     init(ffi: ArbitFFI.ArbitV2RuntimeMetricsSnapshot) {
-        frameQueueDepth = ffi.frame_queue_depth
-        imuQueueDepth = ffi.imu_queue_depth
-        keyframeQueueDepth = ffi.keyframe_queue_depth
-        backendQueueDepth = ffi.backend_queue_depth
+        frameQueueDepth = Int(ffi.frame_queue_depth)
+        imuQueueDepth = Int(ffi.imu_queue_depth)
+        keyframeQueueDepth = Int(ffi.keyframe_queue_depth)
+        backendQueueDepth = Int(ffi.backend_queue_depth)
         droppedFrames = ffi.dropped_frames
         frontendMsMedian = ffi.frontend_ms_median
         frontendMsP95 = ffi.frontend_ms_p95
@@ -203,7 +209,7 @@ public struct V2Anchor {
 
     init(ffi: ArbitFFI.ArbitV2Anchor) {
         anchorId = ffi.anchor_id
-        poseWC = Array(ffi.pose_wc)
+        poseWC = poseArray(from: ffi.pose_wc)
         createdFromKeyframe = ffi.has_keyframe ? ffi.created_from_keyframe : nil
         lastObservedFrame = ffi.last_observed_frame
     }
